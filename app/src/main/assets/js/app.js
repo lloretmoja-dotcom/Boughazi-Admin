@@ -274,8 +274,12 @@ function renderChannels() {
       const statusHtml = c.is_broken
         ? '<span class="status-broken">⚠ Caído</span>'
         : '<span class="status-ok">● OK</span>';
+      // loading="lazy": con muchos canales, el navegador solo descarga
+      // el logo cuando esa fila está a punto de verse en pantalla, en
+      // vez de intentar cargar miles de imágenes todas a la vez (que
+      // es lo que estaba poniendo lento/congelado el panel).
       const logoHtml = c.logo_url
-        ? `<img class="channel-logo" src="${escapeHtml(c.logo_url)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'channel-logo empty',textContent:'—'}))" />`
+        ? `<img class="channel-logo" loading="lazy" src="${escapeHtml(c.logo_url)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'channel-logo empty',textContent:'—'}))" />`
         : `<span class="channel-logo empty">—</span>`;
 
       html += `
@@ -530,28 +534,65 @@ el("check-channels-btn").addEventListener("click", async () => {
   const canalesAComprobar = state.channels.filter((c) => !idsDuplicadosSet.has(c.id));
 
   // 2) Comprobar cada canal restante y borrar de verdad los que fallan.
+  //
+  // ANTES: se comprobaba un canal, se esperaba la respuesta completa, y
+  // SOLO ENTONCES se pasaba al siguiente — uno detrás de otro. Si tienes
+  // miles de canales y algunos de ellos no responden nunca (un servidor
+  // caído no suele dar error rápido, simplemente se queda callado), cada
+  // uno de esos podía dejar el panel esperando mucho rato antes de poder
+  // seguir con el siguiente, y con muchos así sumaba varios minutos.
+  //
+  // AHORA: se comprueban varios canales A LA VEZ (en tandas), y a cada
+  // comprobación se le pone un límite de 8 segundos — si un canal no
+  // contesta en ese tiempo, se da por "no comprobado" (no se borra solo
+  // por tardar) y se sigue enseguida con los demás, sin quedarse esperando.
+  const LIMITE_A_LA_VEZ = 20;
+  const TIEMPO_MAXIMO_MS = 8000;
   const idsCaidos = [];
-  for (const c of canalesAComprobar) {
+  const idsArreglados = [];
+  let comprobados = 0;
+
+  async function comprobarUno(c) {
     let broken = false;
     let comprobableDeVerdad = true;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIEMPO_MAXIMO_MS);
     try {
-      const res = await fetch(c.stream_url, { method: "GET", mode: "cors" });
+      const res = await fetch(c.stream_url, {
+        method: "GET",
+        mode: "cors",
+        signal: controller.signal,
+      });
       broken = !res.ok;
     } catch (_err) {
-      // Si el navegador bloquea la petición (CORS) no podemos saberlo
-      // con seguridad, así que no lo tocamos por eso solo.
+      // Bloqueo de CORS, o se agotó el tiempo de espera (8s): en ningún
+      // caso lo sabemos con seguridad, así que no lo tocamos solo por eso.
       comprobableDeVerdad = false;
+    } finally {
+      clearTimeout(timeoutId);
     }
     if (comprobableDeVerdad && broken) {
       idsCaidos.push(c.id);
     } else if (comprobableDeVerdad && !broken && c.is_broken) {
-      // Estaba marcado como caído de una versión anterior y ahora sí
-      // responde: se limpia la marca.
-      await supabaseClient
-        .from("bt_channels")
-        .update({ is_broken: false, last_checked_at: new Date().toISOString() })
-        .eq("id", c.id);
+      idsArreglados.push(c.id);
     }
+    comprobados += 1;
+    el("channels-status").textContent =
+      `Comprobando canales… ${comprobados}/${canalesAComprobar.length}`;
+  }
+
+  for (let i = 0; i < canalesAComprobar.length; i += LIMITE_A_LA_VEZ) {
+    const tanda = canalesAComprobar.slice(i, i + LIMITE_A_LA_VEZ);
+    await Promise.all(tanda.map((c) => comprobarUno(c)));
+  }
+
+  if (idsArreglados.length) {
+    // Estaban marcados como caídos de una comprobación anterior y ahora
+    // sí responden: se limpia la marca, todos de una vez.
+    await supabaseClient
+      .from("bt_channels")
+      .update({ is_broken: false, last_checked_at: new Date().toISOString() })
+      .in("id", idsArreglados);
   }
   if (idsCaidos.length) {
     await supabaseClient.from("bt_channels").delete().in("id", idsCaidos);
