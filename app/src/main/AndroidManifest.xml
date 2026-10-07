@@ -9,7 +9,7 @@
         android:icon="@drawable/ic_launcher_admin"
         android:label="@string/app_name"
         android:theme="@style/Theme.AppCompat.NoActionBar"
-        android:usesCleartextTraffic="false">
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"
