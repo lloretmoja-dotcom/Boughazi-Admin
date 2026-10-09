@@ -91,8 +91,9 @@ async function tryEnterDashboard() {
   }
   el("login-screen").classList.add("hidden");
   el("dashboard").classList.remove("hidden");
-  // Los canales y las estadísticas se piden a la vez, no uno detrás de otro.
-  await Promise.all([loadChannels(), refreshStats()]);
+  // Los canales, las listas automáticas (están en la misma sección, que es
+  // la que se abre al entrar) y las estadísticas se piden a la vez.
+  await Promise.all([loadChannels(), loadAutoSources(), refreshStats()]);
   startStatsTimer();
 }
 
@@ -137,16 +138,42 @@ el("logout-btn").addEventListener("click", async () => {
 /* Pestañas                                                       */
 /* ------------------------------------------------------------ */
 
+/* El panel tiene cuatro secciones: Códigos, Canales y métodos, Centro de
+   control y Rendimiento. "Códigos" lleva dentro tres apartados más
+   pequeños (vincular por código, códigos de acceso y usuarios). Cada
+   sección pide sus datos a Supabase al abrirla, no antes. */
+
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
     document.querySelectorAll(".tab-panel").forEach((p) => p.classList.add("hidden"));
     btn.classList.add("active");
     el("tab-" + btn.dataset.tab).classList.remove("hidden");
-    if (btn.dataset.tab === "codes") loadCodes();
-    if (btn.dataset.tab === "users") loadUsers();
-    if (btn.dataset.tab === "pairing") loadPairings();
-    if (btn.dataset.tab === "auto") loadAutoSources();
+    if (btn.dataset.tab === "codes") loadSubtab(currentSubtab());
+    if (btn.dataset.tab === "channels") loadAutoSources();
+    if (btn.dataset.tab === "control") loadControl();
+    if (btn.dataset.tab === "stats") refreshStats();
+  });
+});
+
+function currentSubtab() {
+  const active = document.querySelector(".subtab.active");
+  return active ? active.dataset.subtab : "pairing";
+}
+
+function loadSubtab(name) {
+  if (name === "pairing") loadPairings();
+  if (name === "codes") loadCodes();
+  if (name === "users") loadUsers();
+}
+
+document.querySelectorAll(".subtab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".subtab").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".sub-panel").forEach((p) => p.classList.add("hidden"));
+    btn.classList.add("active");
+    el("sub-" + btn.dataset.subtab).classList.remove("hidden");
+    loadSubtab(btn.dataset.subtab);
   });
 });
 
@@ -167,9 +194,9 @@ async function refreshStats() {
 
   const cutoff = new Date(Date.now() - 60 * 1000).toISOString();
 
-  // Las cuatro preguntas se hacen A LA VEZ (antes iban una detrás de otra
-  // y había que esperar la suma de las cuatro).
-  const [registeredRes, onlineRes, activeRes, lastCheckRes] = await Promise.all([
+  // Todas las preguntas se hacen A LA VEZ (antes iban una detrás de otra
+  // y había que esperar la suma de todas).
+  const [registeredRes, onlineRes, activeRes, lastCheckRes, hiddenRes, lastRunRes] = await Promise.all([
     supabaseClient
       .from("bt_viewers")
       .select("id", { count: "exact", head: true }),
@@ -192,11 +219,40 @@ async function refreshStats() {
       .not("last_checked_at", "is", null)
       .order("last_checked_at", { ascending: false })
       .limit(1),
+    // Canales ocultos en la app porque están caídos.
+    supabaseClient
+      .from("bt_channels")
+      .select("id", { count: "exact", head: true })
+      .eq("is_broken", true),
+    // La última pasada TERMINADA de la vigilancia de cada hora, para saber
+    // cuánto tardó. Si todavía no existe la tabla, simplemente sale "—".
+    supabaseClient
+      .from("bt_health_runs")
+      .select("started_at, finished_at")
+      .not("finished_at", "is", null)
+      .order("started_at", { ascending: false })
+      .limit(1),
   ]);
 
   el("stat-registered").textContent = registeredRes.count ?? "—";
   el("stat-online").textContent = onlineRes.count ?? "—";
   el("stat-channels").textContent = activeRes.count ?? "—";
+  el("stat-hidden").textContent = hiddenRes.count ?? "—";
+
+  // Porcentaje de canales que funcionan: activos / (activos + ocultos).
+  const active = activeRes.count;
+  const hidden = hiddenRes.count;
+  el("stat-working-share").textContent =
+    active != null && hidden != null && active + hidden > 0
+      ? `${Math.round((active / (active + hidden)) * 100)} %`
+      : "—";
+
+  const lastRun = !lastRunRes.error && lastRunRes.data && lastRunRes.data[0];
+  el("stat-check-duration").textContent = lastRun
+    ? formatDuration(new Date(lastRun.finished_at) - new Date(lastRun.started_at))
+    : isMissingSqlError(lastRunRes.error)
+      ? "Falta activar el SQL"
+      : "—";
 
   const lastCheckRows = lastCheckRes.data;
   el("stat-last-check").textContent = formatLastCheck(
@@ -209,6 +265,18 @@ async function refreshStats() {
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && state.statsTimer && state.statsStale) refreshStats();
 });
+
+/* "3 min 20 s", "45 s", "1 h 5 min"… */
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const totalSec = Math.round(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const sec = totalSec % 60;
+  if (h) return `${h} h ${m} min`;
+  if (m) return `${m} min ${sec} s`;
+  return `${sec} s`;
+}
 
 function formatLastCheck(iso) {
   if (!iso) return "Todavía no se ha comprobado ningún canal";
@@ -463,10 +531,10 @@ async function fetchAllPages(makeQuery, pageSize = 1000) {
   }
 }
 
-/* Las pestañas "Vincular por código" y "Listas automáticas" usan tablas y
-   funciones nuevas de Supabase. Si todavía no se ha ejecutado su archivo
-   SQL, Supabase contesta que "no existen": en vez de enseñar ese error
-   técnico, se explica qué hay que hacer. */
+/* "Vincular por código", "Listas automáticas" y el "Centro de control"
+   usan tablas y funciones nuevas de Supabase. Si todavía no se ha
+   ejecutado su archivo SQL, Supabase contesta que "no existen": en vez de
+   enseñar ese error técnico, se explica qué hay que hacer. */
 const SQL_MISSING_MSG =
   "Esta función necesita activar antes el archivo SQL en Supabase " +
   "(supabase/mejoras-subida-y-vinculacion.sql: cópialo en el SQL Editor y pulsa Run).";
@@ -1758,5 +1826,166 @@ el("auto-tbody").addEventListener("click", async (e) => {
     loadAutoSources();
   }
 });
+
+/* ------------------------------------------------------------ */
+/* Centro de control (vigilancia automática)                      */
+/* ------------------------------------------------------------ */
+/* Un proceso revisa todos los canales cada hora. Cada pasada deja un
+   resumen en "bt_health_runs" y, en "bt_health_events", lo que ha hecho
+   con cada canal que ha cambiado. Aquí solo se leen esas dos tablas. */
+
+// Qué significa cada tipo de aviso, en palabras normales. Los de tipo
+// "hidden-reason" son los motivos por los que un canal se ha ocultado en la app.
+const HEALTH_EVENTS = {
+  error_http: { label: "Error del servidor (404/500)", kind: "hidden-reason" },
+  sin_respuesta: { label: "No contesta", kind: "hidden-reason" },
+  bucle: { label: "Redirección en bucle", kind: "hidden-reason" },
+  vacio: { label: "Sin vídeo", kind: "hidden-reason" },
+  congelado: { label: "Emisión congelada", kind: "hidden-reason" },
+  borrado: { label: "Borrado", kind: "deleted" },
+  recuperado: { label: "Recuperado", kind: "restored" },
+  duplicado: { label: "Duplicado borrado", kind: "deleted" },
+};
+
+const HIDDEN_EVENT_TYPES = Object.keys(HEALTH_EVENTS).filter((k) => HEALTH_EVENTS[k].kind === "hidden-reason");
+
+function setControlStatus(text, isError) {
+  el("control-status").textContent = text || "";
+  el("control-status").classList.toggle("error-text", !!isError);
+}
+
+async function loadControl() {
+  setControlStatus("Cargando…");
+  const ok = await loadHealthRuns();
+  if (ok) {
+    setControlStatus("");
+    await loadHealthEvents();
+  }
+}
+
+/* Resumen de la última pasada y gráfica de las 24 últimas. Devuelve false
+   si no se ha podido leer (por ejemplo, porque falta el archivo SQL). */
+async function loadHealthRuns() {
+  const { data, error } = await supabaseClient
+    .from("bt_health_runs")
+    .select("*")
+    .order("started_at", { ascending: false })
+    .limit(24);
+  if (error) {
+    setControlStatus(friendlyDbError(error), true);
+    renderHealthSummary(null);
+    el("health-chart").innerHTML = "";
+    el("health-events-tbody").innerHTML = "";
+    return false;
+  }
+  const runs = data || [];
+  renderHealthSummary(runs[0] || null);
+  renderHealthChart(runs.slice().reverse()); // de la más antigua a la más reciente
+  return true;
+}
+
+function renderHealthSummary(run) {
+  const show = (id, value) => {
+    el(id).textContent = value ?? "—";
+  };
+  const warning = el("health-warning");
+  warning.classList.add("hidden");
+
+  if (!run) {
+    show("health-when", "Todavía no ha habido ninguna");
+    el("health-when").title = "";
+    el("health-when-label").textContent = "Última vigilancia";
+    ["health-total", "health-ok", "health-hidden", "health-deleted", "health-restored"].forEach((id) => show(id, null));
+    return;
+  }
+
+  show("health-when", formatLastCheck(run.started_at));
+  el("health-when").title = formatDateTime(run.started_at);
+  el("health-when-label").textContent = run.finished_at
+    ? `Última vigilancia (tardó ${formatDuration(new Date(run.finished_at) - new Date(run.started_at))})`
+    : run.aborted
+      ? "Última vigilancia (no terminó)"
+      : "Última vigilancia (todavía en marcha)";
+  show("health-total", run.total);
+  show("health-ok", run.ok);
+  show("health-hidden", run.hidden);
+  show("health-deleted", run.deleted);
+  show("health-restored", run.restored);
+
+  // Si la pasada se paró a medias (por ejemplo, porque fallaban casi todos
+  // los canales a la vez y parecía un problema de internet del servidor, no
+  // de los canales), se avisa con la explicación que dejó el proceso.
+  if (run.aborted) {
+    warning.textContent =
+      "⚠ La última vigilancia se paró antes de terminar" + (run.note ? `: ${run.note}` : ".");
+    warning.classList.remove("hidden");
+  }
+}
+
+/* Gráfica sencilla hecha solo con CSS: una columna por pasada, con la parte
+   verde (funcionan) abajo y la roja (caídos) encima. Todas las columnas
+   usan la misma escala, la de la pasada con más canales. */
+function renderHealthChart(runs) {
+  const chart = el("health-chart");
+  if (!runs.length) {
+    chart.innerHTML = `<p class="fine-print">Todavía no hay pasadas que enseñar.</p>`;
+    return;
+  }
+  const max = Math.max(1, ...runs.map((r) => (Number(r.ok) || 0) + (Number(r.broken) || 0)));
+  chart.innerHTML = runs
+    .map((r) => {
+      const ok = Number(r.ok) || 0;
+      const broken = Number(r.broken) || 0;
+      const tip = `${formatDateTime(r.started_at)} · ${ok} funcionan · ${broken} caídos${r.aborted ? " · no terminó" : ""}`;
+      return `
+        <div class="health-bar${r.aborted ? " aborted" : ""}" title="${escapeHtml(tip)}">
+          <span class="bar-broken" style="height:${((broken / max) * 100).toFixed(1)}%"></span>
+          <span class="bar-ok" style="height:${((ok / max) * 100).toFixed(1)}%"></span>
+        </div>`;
+    })
+    .join("");
+}
+
+/* Los 200 avisos más recientes, del tipo elegido en el filtro. El filtro
+   se aplica en Supabase, así que "200" son los 200 últimos de ESE tipo. */
+async function loadHealthEvents() {
+  const tbody = el("health-events-tbody");
+  tbody.innerHTML = `<tr><td colspan="5" class="muted">Cargando avisos…</td></tr>`;
+  const filter = el("health-filter").value;
+  let query = supabaseClient
+    .from("bt_health_events")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(200);
+  if (filter === "__hidden") query = query.in("event", HIDDEN_EVENT_TYPES);
+  else if (filter) query = query.eq("event", filter);
+
+  const { data, error } = await query;
+  if (error) {
+    tbody.innerHTML = `<tr><td colspan="5" class="error-text">${escapeHtml(friendlyDbError(error))}</td></tr>`;
+    return;
+  }
+  if (!data || !data.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">No hay avisos${filter ? " de este tipo" : ""}.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = data
+    .map((ev) => {
+      const info = HEALTH_EVENTS[ev.event] || { label: ev.event || "—", kind: "other" };
+      const hint = info.kind === "hidden-reason" ? "Ocultado en la app por este motivo" : "";
+      return `
+        <tr>
+          <td>${escapeHtml(formatDateTime(ev.created_at))}</td>
+          <td class="name-cell" dir="auto">${escapeHtml(ev.channel_name || "—")}</td>
+          <td class="cat-cell" dir="auto">${escapeHtml(ev.category || "—")}</td>
+          <td><span class="event-tag ${escapeHtml(info.kind)}" title="${escapeHtml(hint)}">${escapeHtml(info.label)}</span></td>
+          <td title="${escapeHtml(ev.detail || "")}">${escapeHtml(ev.detail || "—")}</td>
+        </tr>`;
+    })
+    .join("");
+}
+
+el("health-filter").addEventListener("change", loadHealthEvents);
+el("control-refresh-btn").addEventListener("click", loadControl);
 
 init();
