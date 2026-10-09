@@ -111,6 +111,24 @@ function stopStatsTimer() {
   state.statsStale = false;
 }
 
+function loginErrorText(error) {
+  const msg = String(error && error.message || "");
+  const code = String(error && (error.code || "") || "");
+  if (code === "invalid_credentials" || /invalid login credentials/i.test(msg)) {
+    return "Correo o contraseña incorrectos.";
+  }
+  if (code === "email_not_confirmed" || /email not confirmed/i.test(msg)) {
+    return "Este correo todavía no está confirmado. Confírmalo en Supabase → Authentication → Users.";
+  }
+  if (/rate limit|too many/i.test(msg) || error.status === 429) {
+    return "Demasiados intentos seguidos. Espera unos minutos y prueba otra vez.";
+  }
+  if (/failed to fetch|network|load failed/i.test(msg) || !error.status) {
+    return "No se puede conectar con el servidor. Comprueba la conexión a internet. (" + msg + ")";
+  }
+  return "No se pudo entrar: " + msg + (error.status ? " (error " + error.status + ")" : "");
+}
+
 el("login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   el("login-error").classList.add("hidden");
@@ -118,7 +136,10 @@ el("login-form").addEventListener("submit", async (e) => {
   const password = el("login-password").value;
   const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
   if (error) {
-    el("login-error").textContent = "Correo o contraseña incorrectos.";
+    // Se dice el motivo real: antes cualquier fallo (sin internet, correo
+    // sin confirmar, demasiados intentos…) salía como "contraseña
+    // incorrecta" y no había forma de saber qué pasaba.
+    el("login-error").textContent = loginErrorText(error);
     el("login-error").classList.remove("hidden");
     return;
   }
