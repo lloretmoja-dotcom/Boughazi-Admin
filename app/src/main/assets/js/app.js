@@ -201,6 +201,7 @@ async function loadChannels() {
 
   state.channels = all;
   state.selectedIds.clear();
+  el("select-all").checked = false;
   updateBulkBar();
   renderChannels();
   el("channels-status").textContent = state.channels.length
@@ -278,23 +279,27 @@ function renderChannels() {
       // el logo cuando esa fila está a punto de verse en pantalla, en
       // vez de intentar cargar miles de imágenes todas a la vez (que
       // es lo que estaba poniendo lento/congelado el panel).
-      const logoHtml = c.logo_url
+      const logoHtml = safeHttpUrl(c.logo_url)
         ? `<img class="channel-logo" loading="lazy" src="${escapeHtml(c.logo_url)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'channel-logo empty',textContent:'—'}))" />`
         : `<span class="channel-logo empty">—</span>`;
 
       html += `
         <tr>
-          <td><input type="checkbox" class="row-check" data-id="${c.id}" ${
-        state.selectedIds.has(c.id) ? "checked" : ""
+          <td><input type="checkbox" class="row-check" data-id="${escapeHtml(c.id)}" ${
+        state.selectedIds.has(String(c.id)) ? "checked" : ""
       } /></td>
           <td>${idx + 1}</td>
           <td>${logoHtml}</td>
           <td class="name-cell" dir="auto">${escapeHtml(c.name)}</td>
           <td>${statusHtml}</td>
-          <td><a class="link-icon" href="${c.stream_url}" target="_blank" rel="noopener">ver enlace</a></td>
+          <td>${
+        safeHttpUrl(c.stream_url)
+          ? `<a class="link-icon" href="${escapeHtml(c.stream_url)}" target="_blank" rel="noopener">ver enlace</a>`
+          : '<span class="status-broken">enlace no válido</span>'
+      }</td>
           <td>
-            <button class="btn" data-edit="${c.id}">✏️ Editar</button>
-            <button class="btn danger" data-delete="${c.id}">Borrar</button>
+            <button class="btn" data-edit="${escapeHtml(c.id)}">✏️ Editar</button>
+            <button class="btn danger" data-delete="${escapeHtml(c.id)}">Borrar</button>
           </td>
         </tr>`;
     });
@@ -328,6 +333,19 @@ el("channel-search").addEventListener("input", (e) => {
   renderChannels();
 });
 
+/* Solo se aceptan enlaces que empiecen por http:// o https://. Las listas
+   M3U suelen venir de terceros: un enlace del tipo "javascript:..." metido
+   en la lista podría ejecutar código dentro del panel con tu sesión de
+   administrador (y desde aquí se puede borrar o cambiar todo). */
+function safeHttpUrl(str) {
+  try {
+    const u = new URL(String(str || "").trim());
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch (_err) {
+    return false;
+  }
+}
+
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (ch) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -335,8 +353,15 @@ function escapeHtml(str) {
 }
 
 el("select-all").addEventListener("change", (e) => {
-  if (e.target.checked) state.channels.forEach((c) => state.selectedIds.add(c.id));
-  else state.selectedIds.clear();
+  // Solo se marcan los canales que se ven ahora (los de la búsqueda).
+  // Antes se marcaban TODOS aunque hubiera una búsqueda escrita, y
+  // "Borrar seleccionados" borraba también canales que no se veían.
+  const needle = normalizeText(state.channelSearch);
+  if (e.target.checked) {
+    state.channels.filter((c) => matchesSearch(c, needle)).forEach((c) => state.selectedIds.add(String(c.id)));
+  } else {
+    state.selectedIds.clear();
+  }
   renderChannels();
   updateBulkBar();
 });
@@ -374,7 +399,7 @@ async function deleteWholeCountry(category) {
     `Vas a borrar TODO "${category}" (${items.length} canal${items.length === 1 ? "" : "es"}). Esto no se puede deshacer. ¿Seguro?`
   );
   if (!seguro) return;
-  await deleteChannels(items.map((c) => c.id));
+  await deleteChannels(items.map((c) => String(c.id)));
 }
 
 async function deleteChannels(ids) {
@@ -421,7 +446,7 @@ el("new-channel-btn").addEventListener("click", () => {
 });
 
 function openEditChannel(id) {
-  const channel = state.channels.find((c) => c.id === id);
+  const channel = state.channels.find((c) => String(c.id) === String(id));
   if (!channel) return;
   state.editingChannelId = id;
   el("channel-modal-title").textContent = "Editar canal";
@@ -463,6 +488,13 @@ el("channel-form").addEventListener("submit", async (e) => {
     stream_url: el("cf-src").value.trim(),
   };
 
+  if (!safeHttpUrl(payload.stream_url)) {
+    el("channel-form-error").textContent = "El enlace del canal tiene que empezar por http:// o https://";
+    el("channel-form-error").classList.remove("hidden");
+    return;
+  }
+  if (payload.logo_url && !safeHttpUrl(payload.logo_url)) payload.logo_url = null;
+
   if (typedNumber) {
     payload.channel_number = Number(typedNumber);
   } else if (!state.editingChannelId) {
@@ -500,18 +532,48 @@ el("channel-form").addEventListener("submit", async (e) => {
    algunos canales que SÍ funcionan en la app pueden aparecer como
    "no comprobado". Es una ayuda, no una garantía al 100%.
 
-   IMPORTANTE: los canales que de verdad fallan (respuesta HTTP con
-   error, no un simple bloqueo de CORS) se BORRAN para siempre de la
-   base de datos, no se dejan solo ocultos — igual que hace ahora la
-   comprobación automática de cada noche. También se borran aquí los
-   canales duplicados (mismo enlace de vídeo que otro ya guardado). */
+   Los canales que fallan (respuesta HTTP con error, no un simple bloqueo
+   de CORS) se MARCAN como caídos: la app de la tele deja de mostrarlos,
+   pero no se pierden. Muchos fallan solo desde aquí (bloqueo por país o
+   porque piden cabeceras especiales) y en la tele sí funcionan. La
+   comprobación automática de cada noche es la que los borra de verdad
+   cuando llevan 7 días seguidos caídos. Los canales duplicados (mismo
+   enlace de vídeo que otro ya guardado) sí se borran aquí. */
 el("check-channels-btn").addEventListener("click", async () => {
+  const checkBtn = el("check-channels-btn");
+  if (checkBtn.disabled) return;
+  checkBtn.disabled = true;
+  try {
+    await checkChannels();
+  } finally {
+    checkBtn.disabled = false;
+  }
+});
+
+async function deleteIdsInChunks(ids) {
+  for (let i = 0; i < ids.length; i += 200) {
+    const { error } = await supabaseClient.from("bt_channels").delete().in("id", ids.slice(i, i + 200));
+    if (error) throw error;
+  }
+}
+
+async function updateIdsInChunks(ids, values) {
+  for (let i = 0; i < ids.length; i += 200) {
+    const { error } = await supabaseClient.from("bt_channels").update(values).in("id", ids.slice(i, i + 200));
+    if (error) throw error;
+  }
+}
+
+async function checkChannels() {
   el("channels-status").textContent = "Comprobando canales, puede tardar un poco…";
 
   // 1) Duplicados exactos (mismo enlace de vídeo): se queda uno solo.
   const porEnlace = new Map();
   for (const c of state.channels) {
-    const clave = (c.stream_url || "").trim().toLowerCase();
+    // Sin pasar a minúsculas: dos enlaces que solo se distinguen en una
+    // mayúscula (muy habitual en los códigos de acceso de los enlaces) son
+    // canales distintos.
+    const clave = (c.stream_url || "").trim();
     if (!clave) continue;
     if (!porEnlace.has(clave)) porEnlace.set(clave, []);
     porEnlace.get(clave).push(c);
@@ -523,12 +585,17 @@ el("check-channels-btn").addEventListener("click", async () => {
       const aTieneNumero = a.channel_number == null ? 1 : 0;
       const bTieneNumero = b.channel_number == null ? 1 : 0;
       if (aTieneNumero !== bTieneNumero) return aTieneNumero - bTieneNumero;
-      return a.id.localeCompare ? a.id.localeCompare(b.id) : a.id - b.id;
+      return String(a.id).localeCompare(String(b.id));
     });
     for (const sobrante of ordenado.slice(1)) idsDuplicados.push(sobrante.id);
   }
-  if (idsDuplicados.length) {
-    await supabaseClient.from("bt_channels").delete().in("id", idsDuplicados);
+  try {
+    // En tandas de 200: con muchos duplicados, una sola petición era
+    // demasiado larga y fallaba sin avisar.
+    await deleteIdsInChunks(idsDuplicados);
+  } catch (err) {
+    el("channels-status").textContent = "No se pudieron borrar los duplicados: " + err.message;
+    return;
   }
   const idsDuplicadosSet = new Set(idsDuplicados);
   const canalesAComprobar = state.channels.filter((c) => !idsDuplicadosSet.has(c.id));
@@ -570,8 +637,12 @@ el("check-channels-btn").addEventListener("click", async () => {
       comprobableDeVerdad = false;
     } finally {
       clearTimeout(timeoutId);
+      // Cortamos la descarga en cuanto llega la respuesta: un canal en
+      // directo no termina nunca, y antes se quedaban 20 vídeos bajándose
+      // a la vez (gastando datos del móvil) hasta cerrar el panel.
+      controller.abort();
     }
-    if (comprobableDeVerdad && broken) {
+    if (comprobableDeVerdad && broken && !c.is_broken) {
       idsCaidos.push(c.id);
     } else if (comprobableDeVerdad && !broken && c.is_broken) {
       idsArreglados.push(c.id);
@@ -586,23 +657,22 @@ el("check-channels-btn").addEventListener("click", async () => {
     await Promise.all(tanda.map((c) => comprobarUno(c)));
   }
 
-  if (idsArreglados.length) {
+  try {
     // Estaban marcados como caídos de una comprobación anterior y ahora
-    // sí responden: se limpia la marca, todos de una vez.
-    await supabaseClient
-      .from("bt_channels")
-      .update({ is_broken: false, last_checked_at: new Date().toISOString() })
-      .in("id", idsArreglados);
-  }
-  if (idsCaidos.length) {
-    await supabaseClient.from("bt_channels").delete().in("id", idsCaidos);
+    // sí responden: se limpia la marca.
+    await updateIdsInChunks(idsArreglados, { is_broken: false, last_checked_at: new Date().toISOString() });
+    await updateIdsInChunks(idsCaidos, { is_broken: true });
+  } catch (err) {
+    el("channels-status").textContent = "No se pudo guardar el resultado: " + err.message;
+    return;
   }
 
   el("channels-status").textContent =
-    `Hecho: ${idsDuplicados.length} duplicados y ${idsCaidos.length} caídos borrados para siempre.`;
+    `Hecho: ${idsDuplicados.length} duplicados borrados, ${idsCaidos.length} canales marcados como caídos ` +
+    `y ${idsArreglados.length} que vuelven a funcionar.`;
   await loadChannels();
   await refreshStats();
-});
+}
 
 /* ---- Importar lista de canales (M3U / M3U8 / texto simple) ----
    Así no hay que añadir los canales uno a uno con un enlace: se
@@ -620,7 +690,7 @@ el("import-channels-btn").addEventListener("click", () => {
 });
 
 function parseChannelList(text) {
-  const lines = text.split(/\r?\n/);
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
   const items = [];
   let pending = null; // datos del #EXTINF que estamos esperando emparejar con su enlace
 
@@ -629,7 +699,7 @@ function parseChannelList(text) {
     if (!line) continue;
 
     if (line.toUpperCase().startsWith("#EXTINF")) {
-      const commaIdx = line.indexOf(",");
+      const commaIdx = firstCommaOutsideQuotes(line);
       const attrsPart = commaIdx >= 0 ? line.slice(0, commaIdx) : line;
       const namePart = commaIdx >= 0 ? line.slice(commaIdx + 1).trim() : "";
       const logoMatch = attrsPart.match(/tvg-logo="([^"]*)"/i);
@@ -656,21 +726,51 @@ function parseChannelList(text) {
   return items;
 }
 
+/* La coma que separa los datos del nombre en #EXTINF es la primera que
+   NO está entre comillas: tvg-name="Noticias, 24h" lleva una coma dentro
+   y antes cortaba el nombre del canal por ahí. */
+function firstCommaOutsideQuotes(line) {
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '"') inQuotes = !inQuotes;
+    else if (line[i] === "," && !inQuotes) return i;
+  }
+  return -1;
+}
+
 el("import-file-input").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   const text = await file.text();
-  const items = parseChannelList(text).filter((it) => it.streamUrl);
+  const parsed = parseChannelList(text).filter((it) => it.streamUrl);
+  // Se descartan los enlaces que no son http:// ni https:// (ver safeHttpUrl).
+  const valid = parsed.filter((it) => safeHttpUrl(it.streamUrl));
+  const skipped = parsed.length - valid.length;
+  // Y los que ya están en el panel o se repiten dentro del mismo archivo,
+  // para no llenar la lista de canales duplicados.
+  const seen = new Set(state.channels.map((c) => String(c.stream_url || "").trim()));
+  const items = valid.filter((it) => {
+    const key = it.streamUrl.trim();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const duplicates = valid.length - items.length;
 
   if (!items.length) {
-    el("import-status").textContent = "No se ha encontrado ningún canal en ese archivo. Comprueba que sea un M3U válido.";
+    el("import-status").textContent = duplicates
+      ? `Todos los canales de este archivo (${duplicates}) ya están en el panel.`
+      : "No se ha encontrado ningún canal en ese archivo. Comprueba que sea un M3U válido.";
     el("import-preview-wrap").classList.add("hidden");
     el("import-confirm-btn").classList.add("hidden");
     return;
   }
 
   state.importItems = items.map((it, i) => ({ ...it, id: i, selected: true }));
-  el("import-status").textContent = `${items.length} canal(es) encontrados. Quita el visto de los que no quieras subir y toca "Importar".`;
+  el("import-status").textContent =
+    `${items.length} canal(es) nuevos encontrados. Quita el visto de los que no quieras subir y toca "Importar".` +
+    (skipped ? ` (Se han descartado ${skipped} con un enlace no válido.)` : "") +
+    (duplicates ? ` (Se han quitado ${duplicates} que ya estaban o se repetían.)` : "");
   renderImportPreview();
   el("import-preview-wrap").classList.remove("hidden");
   el("import-select-all").checked = true;
@@ -739,24 +839,33 @@ el("import-confirm-btn").addEventListener("click", async () => {
       channel_number: numeroSiguiente(categoriaFinal),
       name: it.name,
       category: categoriaFinal,
-      logo_url: it.logoUrl || null,
+      logo_url: safeHttpUrl(it.logoUrl) ? it.logoUrl : null,
       stream_url: it.streamUrl,
     };
   });
 
   el("import-confirm-btn").disabled = true;
-  el("import-confirm-btn").textContent = "Importando…";
   el("import-error").classList.add("hidden");
 
-  const { error } = await supabaseClient.from("bt_channels").insert(rows);
+  // Se suben en tandas de 500: con listas de miles de canales, una sola
+  // petición enorme podía fallar y no se subía ninguno.
+  const chunkSize = 500;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    el("import-confirm-btn").textContent = `Importando… ${Math.min(i + chunkSize, rows.length)}/${rows.length}`;
+    const { error } = await supabaseClient.from("bt_channels").insert(rows.slice(i, i + chunkSize));
+    if (error) {
+      el("import-confirm-btn").disabled = false;
+      el("import-error").textContent =
+        `No se pudo importar a partir del canal ${i + 1}: ${error.message}` +
+        (i ? ` (los ${i} primeros sí se han subido)` : "");
+      el("import-error").classList.remove("hidden");
+      updateImportConfirmLabel();
+      await loadChannels();
+      return;
+    }
+  }
 
   el("import-confirm-btn").disabled = false;
-  if (error) {
-    el("import-error").textContent = "No se pudo importar: " + error.message;
-    el("import-error").classList.remove("hidden");
-    updateImportConfirmLabel();
-    return;
-  }
 
   el("import-modal").classList.add("hidden");
   await loadChannels();
@@ -770,7 +879,10 @@ el("import-confirm-btn").addEventListener("click", async () => {
 function generateCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sin caracteres confusos
   let out = "";
-  for (let i = 0; i < 8; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  // crypto.getRandomValues: aleatorio de verdad, no se puede adivinar.
+  // 256 es múltiplo de 32 (las letras posibles), así que no hay sesgo.
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  for (let i = 0; i < 8; i++) out += chars[bytes[i] % chars.length];
   return out;
 }
 
@@ -779,7 +891,10 @@ async function loadCodes() {
     .from("bt_access_codes")
     .select("*")
     .order("created_at", { ascending: false });
-  if (error) return;
+  if (error) {
+    el("codes-tbody").innerHTML = `<tr><td colspan="5" class="error-text">Error al cargar: ${escapeHtml(error.message)}</td></tr>`;
+    return;
+  }
   el("codes-tbody").innerHTML = data
     .map((code) => {
       const statusHtml = code.used_by_email
@@ -787,11 +902,11 @@ async function loadCodes() {
         : '<span class="status-ok">Libre</span>';
       return `
         <tr>
-          <td>${code.code}</td>
+          <td>${escapeHtml(code.code)}</td>
           <td>${escapeHtml(code.label || "")}</td>
           <td>${statusHtml}</td>
           <td>${escapeHtml(code.used_by_email || "—")}</td>
-          <td><button class="btn danger" data-del-code="${code.id}">Borrar</button></td>
+          <td><button class="btn danger" data-del-code="${escapeHtml(code.id)}">Borrar</button></td>
         </tr>`;
     })
     .join("");
@@ -799,7 +914,8 @@ async function loadCodes() {
   document.querySelectorAll("[data-del-code]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       if (!confirm("¿Borrar este código?")) return;
-      await supabaseClient.from("bt_access_codes").delete().eq("id", btn.dataset.delCode);
+      const { error } = await supabaseClient.from("bt_access_codes").delete().eq("id", btn.dataset.delCode);
+      if (error) alert("No se pudo borrar el código: " + error.message);
       loadCodes();
     });
   });
@@ -883,16 +999,16 @@ function renderUsers() {
       (u) => `
         <tr>
           <td dir="auto">${escapeHtml(u.email || "—")}</td>
-          <td>${formatDateOnly(u.created_at)}</td>
+          <td>${escapeHtml(formatDateOnly(u.created_at))}</td>
           <td>${escapeHtml(u.linked_code || "—")}</td>
           <td>${accessStatusHtml(u.access_expires_at)}</td>
           <td>
             <div class="user-time-actions">
-              <button class="btn" data-add-month="${u.id}">+1 mes</button>
-              <button class="btn" data-add-year="${u.id}">+1 año</button>
-              <input type="date" data-date-input="${u.id}" />
-              <button class="btn" data-set-date="${u.id}">Fijar fecha</button>
-              <button class="btn" data-clear-expiry="${u.id}">Quitar caducidad</button>
+              <button class="btn" data-add-month="${escapeHtml(u.id)}">+1 mes</button>
+              <button class="btn" data-add-year="${escapeHtml(u.id)}">+1 año</button>
+              <input type="date" data-date-input="${escapeHtml(u.id)}" />
+              <button class="btn" data-set-date="${escapeHtml(u.id)}">Fijar fecha</button>
+              <button class="btn" data-clear-expiry="${escapeHtml(u.id)}">Quitar caducidad</button>
             </div>
           </td>
         </tr>`
