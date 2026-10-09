@@ -680,6 +680,7 @@ async function checkChannels() {
 
 el("import-channels-btn").addEventListener("click", () => {
   el("import-file-input").value = "";
+  el("import-url-input").value = "";
   el("import-category-override").value = "";
   el("import-status").textContent = "";
   el("import-preview-wrap").classList.add("hidden");
@@ -741,7 +742,68 @@ function firstCommaOutsideQuotes(line) {
 el("import-file-input").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
-  const text = await file.text();
+  showImportPreview(await file.text());
+});
+
+/* Descarga el texto de una lista. Dentro de la app del panel se usa la
+   descarga de Android (window.BoughaziNative), porque el navegador
+   interno no deja leer listas de webs que no lo autorizan (CORS). En un
+   navegador normal se usa fetch. */
+let nativeDownloadSeq = 0;
+const nativeDownloads = new Map();
+window.onNativeDownload = (id, ok, payload) => {
+  const pending = nativeDownloads.get(id);
+  if (!pending) return;
+  nativeDownloads.delete(id);
+  if (ok) pending.resolve(payload);
+  else pending.reject(new Error(payload));
+};
+
+async function downloadListText(url) {
+  if (window.BoughaziNative && window.BoughaziNative.downloadText) {
+    const id = ++nativeDownloadSeq;
+    return new Promise((resolve, reject) => {
+      nativeDownloads.set(id, { resolve, reject });
+      window.BoughaziNative.downloadText(id, url);
+    });
+  }
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`el servidor ha contestado con el error ${res.status}`);
+    return await res.text();
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error("tarda demasiado (más de 1 minuto)");
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/* Importar desde un enlace: el panel descarga la lista él mismo, sin
+   tener que guardarla antes como archivo en el móvil. */
+el("import-url-btn").addEventListener("click", async () => {
+  const url = el("import-url-input").value.trim();
+  if (!safeHttpUrl(url)) {
+    el("import-status").textContent = "El enlace de la lista tiene que empezar por http:// o https://";
+    return;
+  }
+  const btn = el("import-url-btn");
+  btn.disabled = true;
+  el("import-status").textContent = "Descargando la lista…";
+  try {
+    showImportPreview(await downloadListText(url));
+  } catch (err) {
+    el("import-status").textContent = `No se pudo descargar la lista: ${err.message}`;
+    el("import-preview-wrap").classList.add("hidden");
+    el("import-confirm-btn").classList.add("hidden");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function showImportPreview(text) {
   const parsed = parseChannelList(text).filter((it) => it.streamUrl);
   // Se descartan los enlaces que no son http:// ni https:// (ver safeHttpUrl).
   const valid = parsed.filter((it) => safeHttpUrl(it.streamUrl));
@@ -776,7 +838,7 @@ el("import-file-input").addEventListener("change", async (e) => {
   el("import-select-all").checked = true;
   el("import-confirm-btn").classList.remove("hidden");
   updateImportConfirmLabel();
-});
+}
 
 function renderImportPreview() {
   const override = el("import-category-override").value.trim();

@@ -3,6 +3,7 @@ package tv.boughazi.admin
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -10,6 +11,10 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 
 /**
  * El panel de administración de Boughazi es una página web (HTML/CSS/JS)
@@ -59,6 +64,12 @@ class MainActivity : AppCompatActivity() {
         // se abre la aplicación).
         webView.settings.databaseEnabled = true
 
+        // "Importar desde un enlace": la página pide a Android que descargue
+        // la lista, porque el WebView no la deja leer listas de otras webs
+        // que no lo autorizan (CORS). Solo descarga texto de enlaces
+        // http/https, como mucho 20 MB.
+        webView.addJavascriptInterface(NativeBridge(), "BoughaziNative")
+
         webView.webViewClient = object : WebViewClient() {
             // Las páginas propias de la aplicación (index.html y demás)
             // se quedan abriéndose aquí dentro, con normalidad. Pero si
@@ -106,6 +117,70 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.loadUrl("file:///android_asset/index.html")
+    }
+
+    private inner class NativeBridge {
+        @JavascriptInterface
+        fun downloadText(id: Int, url: String) {
+            Thread {
+                val (ok, payload) = try {
+                    true to downloadList(url)
+                } catch (e: Exception) {
+                    false to (e.message ?: "error desconocido")
+                }
+                val js = "window.onNativeDownload($id, $ok, ${JSONObject.quote(payload)})"
+                runOnUiThread { webView.evaluateJavascript(js, null) }
+            }.start()
+        }
+    }
+
+    private fun downloadList(start: String): String {
+        var current = start
+        // Se siguen a mano las redirecciones (también de http a https),
+        // como mucho 5.
+        repeat(5) {
+            val url = URL(current)
+            if (url.protocol != "http" && url.protocol != "https") {
+                throw IllegalArgumentException("el enlace tiene que empezar por http:// o https://")
+            }
+            val conn = url.openConnection() as HttpURLConnection
+            conn.instanceFollowRedirects = false
+            conn.connectTimeout = 20_000
+            conn.readTimeout = 60_000
+            conn.setRequestProperty("User-Agent", "BoughaziAdmin")
+            try {
+                val code = conn.responseCode
+                if (code in 300..399) {
+                    val location = conn.getHeaderField("Location")
+                        ?: throw IllegalStateException("redirección sin destino")
+                    current = URL(url, location).toString()
+                    return@repeat
+                }
+                if (code !in 200..299) {
+                    throw IllegalStateException("el servidor ha contestado con el error $code")
+                }
+                val out = ByteArrayOutputStream()
+                conn.inputStream.use { input ->
+                    val buf = ByteArray(16 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        if (out.size() > MAX_LIST_BYTES) {
+                            throw IllegalStateException("la lista es demasiado grande (más de 20 MB)")
+                        }
+                    }
+                }
+                return out.toString("UTF-8")
+            } finally {
+                conn.disconnect()
+            }
+        }
+        throw IllegalStateException("demasiadas redirecciones")
+    }
+
+    companion object {
+        private const val MAX_LIST_BYTES = 20 * 1024 * 1024
     }
 
     // Si la persona está navegando dentro del panel (por ejemplo, en la
