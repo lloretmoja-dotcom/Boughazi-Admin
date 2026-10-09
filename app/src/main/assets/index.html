@@ -40,37 +40,115 @@
   </header>
 
   <nav class="tabs">
-    <button class="tab active" data-tab="stats">Estadísticas</button>
-    <button class="tab" data-tab="channels">Canales</button>
     <button class="tab" data-tab="codes">Códigos</button>
-    <button class="tab" data-tab="users">Usuarios</button>
+    <button class="tab active" data-tab="channels">Canales y métodos</button>
+    <button class="tab" data-tab="control">Centro de control</button>
+    <button class="tab" data-tab="stats">Rendimiento</button>
   </nav>
 
-  <!-- ---- Estadísticas ---- -->
-  <section id="tab-stats" class="tab-panel">
-    <div class="stat-cards">
-      <div class="stat-card">
-        <span class="stat-number" id="stat-registered">—</span>
-        <span class="stat-label">Usuarios registrados en total</span>
+  <!-- ==== 1. Códigos: vincular teles, códigos de acceso y usuarios ==== -->
+  <section id="tab-codes" class="tab-panel hidden">
+    <nav class="subtabs">
+      <button class="subtab active" data-subtab="pairing">Vincular por código</button>
+      <button class="subtab" data-subtab="codes">Códigos de acceso</button>
+      <button class="subtab" data-subtab="users">Usuarios</button>
+    </nav>
+
+    <!-- ---- Vincular por código ---- -->
+    <div id="sub-pairing" class="sub-panel">
+      <div class="panel-head">
+        <h2>Vincular una tele por código</h2>
       </div>
-      <div class="stat-card highlight">
-        <span class="stat-number" id="stat-online">—</span>
-        <span class="stat-label">Viendo la televisión ahora mismo</span>
-      </div>
-      <div class="stat-card">
-        <span class="stat-number" id="stat-channels">—</span>
-        <span class="stat-label">Canales activos</span>
-      </div>
-      <div class="stat-card">
-        <span class="stat-number stat-text" id="stat-last-check">—</span>
-        <span class="stat-label">Última comprobación automática de canales</span>
+      <p class="fine-print">En la tele, entra en "Vincular por código": aparece un código de 8 letras y números. Escríbelo aquí junto con la lista que quieres que vea esa tele y pulsa "Enviar". La tele la recibe sola en unos segundos, sin tener que escribir enlaces largos con el mando. Si nadie lo usa, el código caduca a los 30 minutos.</p>
+
+      <form id="pair-form" class="form-card" autocomplete="off" novalidate>
+        <label for="pair-code">Código que sale en la tele</label>
+        <input id="pair-code" type="text" class="code-input" required maxlength="20" autocapitalize="characters" spellcheck="false" placeholder="Ej: ABCD2345" />
+
+        <label for="pair-label">Etiqueta (opcional, para recordar de quién es)</label>
+        <input id="pair-label" type="text" placeholder="Ej: Salón de la familia García" />
+
+        <label for="pair-type">Tipo de lista</label>
+        <select id="pair-type">
+          <option value="m3u">Enlace de lista (M3U)</option>
+          <option value="xtream">Xtream Codes (servidor, usuario y contraseña)</option>
+        </select>
+
+        <div id="pair-m3u-fields">
+          <label for="pair-url">Enlace de la lista (M3U)</label>
+          <input id="pair-url" type="url" placeholder="https://.../lista.m3u" />
+        </div>
+
+        <div id="pair-xtream-fields" class="hidden">
+          <label for="pair-xtream-server">Servidor Xtream</label>
+          <input id="pair-xtream-server" type="url" placeholder="http://servidor.com:8080" />
+          <label for="pair-xtream-user">Usuario</label>
+          <input id="pair-xtream-user" type="text" autocapitalize="none" spellcheck="false" />
+          <label for="pair-xtream-pass">Contraseña</label>
+          <input id="pair-xtream-pass" type="password" autocomplete="new-password" />
+        </div>
+
+        <button id="pair-submit" type="submit" class="btn btn-primary btn-block">Enviar lista a la tele</button>
+      </form>
+      <p id="pair-status" class="fine-print"></p>
+
+      <h3 class="section-title">Teles vinculadas</h3>
+      <div class="table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr><th>Código</th><th>Etiqueta</th><th>Lista</th><th>Último cambio</th><th></th></tr>
+          </thead>
+          <tbody id="pairings-tbody"></tbody>
+        </table>
       </div>
     </div>
-    <p class="fine-print">El número de "viendo ahora" se actualiza solo cada 15 segundos. La comprobación de canales se ejecuta ella sola todas las noches (y se puede ver aquí cuándo fue la última vez, sin depender del color de cada canal).</p>
+
+    <!-- ---- Códigos de acceso ---- -->
+    <div id="sub-codes" class="sub-panel hidden">
+      <div class="panel-head">
+        <h2>Códigos de acceso</h2>
+        <button id="new-code-btn" class="btn btn-primary">+ Generar código</button>
+      </div>
+      <p class="fine-print">Genera un código y dáselo a la persona que activa su televisión. Lo introduce una sola vez dentro de la app.</p>
+      <div class="table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr><th>Código</th><th>Etiqueta</th><th>Estado</th><th>Usado por</th><th></th></tr>
+          </thead>
+          <tbody id="codes-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ---- Usuarios ---- -->
+    <div id="sub-users" class="sub-panel hidden">
+      <div class="panel-head">
+        <h2>Usuarios registrados</h2>
+      </div>
+      <input id="user-search" type="search" class="search-input" placeholder="🔎 Buscar por correo…" />
+      <p class="fine-print">El acceso caduca solo, sin que tengas que hacer nada: en cuanto llega la fecha que le pongas a una persona, deja de ver los canales automáticamente. Si no le pones ninguna fecha, su acceso no caduca nunca.</p>
+      <div class="table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr><th>Correo</th><th>Registrado</th><th>Código usado</th><th>Acceso</th><th>Poner tiempo</th></tr>
+          </thead>
+          <tbody id="users-tbody"></tbody>
+        </table>
+      </div>
+    </div>
   </section>
 
-  <!-- ---- Canales ---- -->
-  <section id="tab-channels" class="tab-panel hidden">
+  <!-- ==== 2. Canales y métodos de subida ==== -->
+  <section id="tab-channels" class="tab-panel">
+    <div class="methods-box">
+      <strong>Formas de subir canales</strong>
+      <ul class="fine-print">
+        <li><b>+ Añadir canal</b>: uno a uno, pegando su enlace.</li>
+        <li><b>📂 Importar lista</b>: muchos de golpe desde un archivo M3U, el enlace de una lista o una cuenta Xtream Codes.</li>
+        <li><b>Listas automáticas</b> (más abajo): enlaces que se vuelven a importar solos cada noche.</li>
+      </ul>
+    </div>
+
     <div class="panel-head">
       <h2>Canales</h2>
       <div class="panel-head-actions">
@@ -99,40 +177,129 @@
         <tbody id="channels-tbody"></tbody>
       </table>
     </div>
+
+    <!-- ---- Listas automáticas ---- -->
+    <div class="section-block">
+      <div class="panel-head">
+        <h2>Listas automáticas</h2>
+        <button id="new-auto-btn" class="btn btn-primary">+ Añadir lista</button>
+      </div>
+      <p class="fine-print">Cada noche, un proceso automático vuelve a descargar estas listas y añade solo los canales nuevos: los que ya tienes no se tocan ni se duplican, y no se borra nada. Las listas desactivadas se saltan. En "Resultado" se ve qué pasó la última vez.</p>
+      <div class="table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr><th>Nombre</th><th>Lista</th><th>Categoría</th><th>Estado</th><th>Última vez</th><th>Resultado</th><th></th></tr>
+          </thead>
+          <tbody id="auto-tbody"></tbody>
+        </table>
+      </div>
+    </div>
   </section>
 
-  <!-- ---- Códigos ---- -->
-  <section id="tab-codes" class="tab-panel hidden">
+  <!-- ==== 3. Centro de control (vigilancia automática) ==== -->
+  <section id="tab-control" class="tab-panel hidden">
     <div class="panel-head">
-      <h2>Códigos de acceso</h2>
-      <button id="new-code-btn" class="btn btn-primary">+ Generar código</button>
+      <h2>Centro de control</h2>
+      <button id="control-refresh-btn" class="btn">↻ Actualizar</button>
     </div>
-    <p class="fine-print">Genera un código y dáselo a la persona que activa su televisión. Lo introduce una sola vez dentro de la app.</p>
+    <p class="fine-print">La vigilancia se ejecuta sola cada hora: oculta enseguida en la app los canales que dan error, no contestan, entran en bucle, no tienen vídeo o están congelados; los borra si siguen caídos 7 días seguidos, y los vuelve a mostrar en cuanto funcionan otra vez. Aquí se ve lo que ha hecho.</p>
+    <p id="control-status" class="fine-print"></p>
+
+    <div id="health-warning" class="warning-box hidden"></div>
+
+    <div class="stat-cards">
+      <div class="stat-card">
+        <span class="stat-number stat-text" id="health-when">—</span>
+        <span class="stat-label" id="health-when-label">Última vigilancia</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-number" id="health-total">—</span>
+        <span class="stat-label">Canales comprobados</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-number status-ok" id="health-ok">—</span>
+        <span class="stat-label">Funcionan</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-number" id="health-hidden">—</span>
+        <span class="stat-label">Ocultados en esta pasada</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-number" id="health-deleted">—</span>
+        <span class="stat-label">Borrados</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-number" id="health-restored">—</span>
+        <span class="stat-label">Recuperados</span>
+      </div>
+    </div>
+
+    <h3 class="section-title">Últimas 24 pasadas</h3>
+    <div id="health-chart" class="health-chart"></div>
+    <p class="fine-print chart-legend">
+      <span class="legend-dot ok"></span> Funcionan
+      <span class="legend-dot broken"></span> Caídos
+    </p>
+
+    <div class="panel-head section-title-row">
+      <h3 class="section-title">Últimos avisos</h3>
+      <select id="health-filter" class="inline-select">
+        <option value="">Todos los avisos</option>
+        <option value="__hidden">Ocultados (cualquier motivo)</option>
+        <option value="error_http">Error del servidor (404/500)</option>
+        <option value="sin_respuesta">No contesta</option>
+        <option value="bucle">Redirección en bucle</option>
+        <option value="vacio">Sin vídeo</option>
+        <option value="congelado">Emisión congelada</option>
+        <option value="borrado">Borrado</option>
+        <option value="recuperado">Recuperado</option>
+        <option value="duplicado">Duplicado borrado</option>
+      </select>
+    </div>
     <div class="table-wrap">
       <table class="admin-table">
         <thead>
-          <tr><th>Código</th><th>Etiqueta</th><th>Estado</th><th>Usado por</th><th></th></tr>
+          <tr><th>Fecha</th><th>Canal</th><th>Categoría</th><th>Qué pasó</th><th>Detalle</th></tr>
         </thead>
-        <tbody id="codes-tbody"></tbody>
+        <tbody id="health-events-tbody"></tbody>
       </table>
     </div>
   </section>
 
-  <!-- ---- Usuarios ---- -->
-  <section id="tab-users" class="tab-panel hidden">
-    <div class="panel-head">
-      <h2>Usuarios registrados</h2>
+  <!-- ==== 4. Rendimiento ==== -->
+  <section id="tab-stats" class="tab-panel hidden">
+    <div class="stat-cards">
+      <div class="stat-card">
+        <span class="stat-number" id="stat-registered">—</span>
+        <span class="stat-label">Usuarios registrados en total</span>
+      </div>
+      <div class="stat-card highlight">
+        <span class="stat-number" id="stat-online">—</span>
+        <span class="stat-label">Viendo la televisión ahora mismo</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-number" id="stat-channels">—</span>
+        <span class="stat-label">Canales activos</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-number" id="stat-hidden">—</span>
+        <span class="stat-label">Canales ocultos (caídos)</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-number" id="stat-working-share">—</span>
+        <span class="stat-label">Canales que funcionan</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-number stat-text" id="stat-last-check">—</span>
+        <span class="stat-label">Última comprobación automática de canales</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-number stat-text" id="stat-check-duration">—</span>
+        <span class="stat-label">Lo que tardó la última vigilancia</span>
+      </div>
     </div>
-    <input id="user-search" type="search" class="search-input" placeholder="🔎 Buscar por correo…" />
-    <p class="fine-print">El acceso caduca solo, sin que tengas que hacer nada: en cuanto llega la fecha que le pongas a una persona, deja de ver los canales automáticamente. Si no le pones ninguna fecha, su acceso no caduca nunca.</p>
-    <div class="table-wrap">
-      <table class="admin-table">
-        <thead>
-          <tr><th>Correo</th><th>Registrado</th><th>Código usado</th><th>Acceso</th><th>Poner tiempo</th></tr>
-        </thead>
-        <tbody id="users-tbody"></tbody>
-      </table>
-    </div>
+    <p class="fine-print">Estos números se actualizan solos cada 15 segundos (y se paran mientras el panel está en segundo plano). La comprobación de canales se ejecuta ella sola cada hora, y aquí se ve cuándo fue la última vez sin depender del color de cada canal.</p>
+    <p class="fine-print">Para que las teles vayan rápidas, no descargan la lista entera de canales cada vez: solo preguntan el "número de versión" del catálogo (una respuesta diminuta) y bajan la lista completa únicamente cuando ha cambiado. Los índices de la base de datos hacen que esas consultas sean rápidas aunque haya miles de canales.</p>
   </section>
 </div>
 
@@ -173,6 +340,22 @@
     <label>Archivo (.m3u, .m3u8 o .txt)</label>
     <input id="import-file-input" type="file" accept=".m3u,.m3u8,.txt,text/plain" />
 
+    <label>…o pega el enlace de la lista (M3U)</label>
+    <input id="import-url-input" type="url" placeholder="https://.../lista.m3u" />
+    <button id="import-url-btn" class="btn" type="button">Descargar lista</button>
+
+    <div class="import-option">
+      <label class="import-option-title">…o entra con Xtream Codes</label>
+      <p class="fine-print">Si tu proveedor te ha dado una dirección de servidor, un usuario y una contraseña (en vez de un enlace), escríbelos aquí y se traen sus canales en directo.</p>
+      <label for="import-xtream-server">Servidor</label>
+      <input id="import-xtream-server" type="url" placeholder="http://servidor.com:8080" />
+      <label for="import-xtream-user">Usuario</label>
+      <input id="import-xtream-user" type="text" autocapitalize="none" spellcheck="false" />
+      <label for="import-xtream-pass">Contraseña</label>
+      <input id="import-xtream-pass" type="password" autocomplete="new-password" />
+      <button id="import-xtream-btn" class="btn" type="button">Cargar canales de Xtream</button>
+    </div>
+
     <label>Categoría para todos estos canales (opcional)</label>
     <input id="import-category-override" type="text" placeholder="Ej: España, Egipto, Deportes…" />
     <p class="fine-print">Si la rellenas, todos los canales de este archivo entrarán con esa misma categoría (por ejemplo, el nombre del país), así se quedan agrupados juntos en la app aunque luego importes otros países. Si la dejas en blanco, se usa la categoría que ya traiga el propio archivo.</p>
@@ -190,6 +373,47 @@
 
     <button id="import-confirm-btn" class="btn btn-primary btn-block hidden">Importar canales</button>
     <p id="import-error" class="fine-print error-text hidden"></p>
+  </div>
+</div>
+
+<!-- ======================= MODAL: Lista automática ======================= -->
+<div id="auto-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <button class="modal-close" data-close="auto-modal" aria-label="Cerrar">✕</button>
+    <h3 id="auto-modal-title">Añadir lista automática</h3>
+    <form id="auto-form" autocomplete="off" novalidate>
+      <label for="auto-name">Nombre (para reconocerla)</label>
+      <input id="auto-name" type="text" placeholder="Ej: Canales de Marruecos" />
+
+      <label for="auto-type">Tipo de lista</label>
+      <select id="auto-type">
+        <option value="m3u">Enlace de lista (M3U)</option>
+        <option value="xtream">Xtream Codes (servidor, usuario y contraseña)</option>
+      </select>
+
+      <div id="auto-m3u-fields">
+        <label for="auto-url">Enlace de la lista (M3U)</label>
+        <input id="auto-url" type="url" placeholder="https://.../lista.m3u" />
+      </div>
+
+      <div id="auto-xtream-fields" class="hidden">
+        <label for="auto-xtream-server">Servidor Xtream</label>
+        <input id="auto-xtream-server" type="url" placeholder="http://servidor.com:8080" />
+        <label for="auto-xtream-user">Usuario</label>
+        <input id="auto-xtream-user" type="text" autocapitalize="none" spellcheck="false" />
+        <label for="auto-xtream-pass">Contraseña</label>
+        <input id="auto-xtream-pass" type="password" autocomplete="new-password" />
+      </div>
+
+      <label for="auto-category">Categoría para todos sus canales (opcional)</label>
+      <input id="auto-category" type="text" placeholder="Ej: Marruecos, Deportes…" />
+      <p class="fine-print">Si la dejas en blanco, cada canal entra con la categoría que traiga la propia lista.</p>
+
+      <label class="check-row"><input id="auto-enabled" type="checkbox" checked /> Activa (se importa cada noche)</label>
+
+      <button type="submit" class="btn btn-primary btn-block">Guardar lista</button>
+    </form>
+    <p id="auto-form-error" class="fine-print error-text hidden"></p>
   </div>
 </div>
 

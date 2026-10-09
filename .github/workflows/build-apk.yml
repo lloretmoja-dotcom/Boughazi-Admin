@@ -3,6 +3,8 @@ name: Compilar APK de Boughazi Admin
 on:
   push:
     branches: [ main ]
+  # En los Pull Requests solo se comprueba que compila; no se publica nada.
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -39,6 +41,7 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
 
       - name: Publicar el APK en un enlace permanente (para el móvil)
+        if: github.event_name != 'pull_request'
         uses: ncipollo/release-action@v1
         with:
           tag: ultima-version

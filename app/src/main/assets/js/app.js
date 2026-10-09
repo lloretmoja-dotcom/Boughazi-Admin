@@ -4,14 +4,27 @@
 
 const el = (id) => document.getElementById(id);
 
+/* Cuántas filas se pintan de golpe en la tabla de canales (y en la vista
+   previa de importar). Con miles de canales, pintarlos todos a la vez
+   dejaba el panel congelado unos segundos; ahora se pintan los primeros
+   y un botón "Mostrar más" añade otra tanda. */
+const CHANNEL_PAGE = 300;
+const IMPORT_PAGE = 500;
+
 const state = {
   channels: [],
   selectedIds: new Set(),
   statsTimer: null,
+  statsStale: false,
   importItems: [],
+  importRenderLimit: IMPORT_PAGE,
   channelSearch: "",
+  channelRenderLimit: CHANNEL_PAGE,
   editingChannelId: null,
   userSearch: "",
+  pairings: [],
+  autoSources: [],
+  editingAutoId: null,
 };
 
 /* ------------------------------------------------------------ */
@@ -78,9 +91,24 @@ async function tryEnterDashboard() {
   }
   el("login-screen").classList.add("hidden");
   el("dashboard").classList.remove("hidden");
-  await loadChannels();
-  await refreshStats();
+  // Los canales, las listas automáticas (están en la misma sección, que es
+  // la que se abre al entrar) y las estadísticas se piden a la vez.
+  await Promise.all([loadChannels(), loadAutoSources(), refreshStats()]);
+  startStatsTimer();
+}
+
+/* El contador de "viendo ahora" se refresca cada 15 segundos. Antes de
+   arrancarlo se para el que hubiera, para que al cerrar sesión y volver a
+   entrar no se queden dos (o más) contadores funcionando a la vez. */
+function startStatsTimer() {
+  stopStatsTimer();
   state.statsTimer = setInterval(refreshStats, 15000);
+}
+
+function stopStatsTimer() {
+  if (state.statsTimer) clearInterval(state.statsTimer);
+  state.statsTimer = null;
+  state.statsStale = false;
 }
 
 el("login-form").addEventListener("submit", async (e) => {
@@ -98,7 +126,10 @@ el("login-form").addEventListener("submit", async (e) => {
 });
 
 el("logout-btn").addEventListener("click", async () => {
-  clearInterval(state.statsTimer);
+  stopStatsTimer();
+  // Que no se queden a la vista contraseñas de Xtream escritas en los formularios.
+  el("pair-form").reset();
+  el("import-xtream-pass").value = "";
   await supabaseClient.auth.signOut();
   showLogin();
 });
@@ -107,14 +138,42 @@ el("logout-btn").addEventListener("click", async () => {
 /* Pestañas                                                       */
 /* ------------------------------------------------------------ */
 
+/* El panel tiene cuatro secciones: Códigos, Canales y métodos, Centro de
+   control y Rendimiento. "Códigos" lleva dentro tres apartados más
+   pequeños (vincular por código, códigos de acceso y usuarios). Cada
+   sección pide sus datos a Supabase al abrirla, no antes. */
+
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
     document.querySelectorAll(".tab-panel").forEach((p) => p.classList.add("hidden"));
     btn.classList.add("active");
     el("tab-" + btn.dataset.tab).classList.remove("hidden");
-    if (btn.dataset.tab === "codes") loadCodes();
-    if (btn.dataset.tab === "users") loadUsers();
+    if (btn.dataset.tab === "codes") loadSubtab(currentSubtab());
+    if (btn.dataset.tab === "channels") loadAutoSources();
+    if (btn.dataset.tab === "control") loadControl();
+    if (btn.dataset.tab === "stats") refreshStats();
+  });
+});
+
+function currentSubtab() {
+  const active = document.querySelector(".subtab.active");
+  return active ? active.dataset.subtab : "pairing";
+}
+
+function loadSubtab(name) {
+  if (name === "pairing") loadPairings();
+  if (name === "codes") loadCodes();
+  if (name === "users") loadUsers();
+}
+
+document.querySelectorAll(".subtab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".subtab").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".sub-panel").forEach((p) => p.classList.add("hidden"));
+    btn.classList.add("active");
+    el("sub-" + btn.dataset.subtab).classList.remove("hidden");
+    loadSubtab(btn.dataset.subtab);
   });
 });
 
@@ -123,40 +182,100 @@ document.querySelectorAll(".tab").forEach((btn) => {
 /* ------------------------------------------------------------ */
 
 async function refreshStats() {
-  const { count: registered } = await supabaseClient
-    .from("bt_viewers")
-    .select("id", { count: "exact", head: true });
+  // Con el panel en segundo plano (otra app delante, pantalla apagada…)
+  // nadie está mirando los números, así que no se le pregunta nada a
+  // Supabase. Se apunta que faltan datos y se ponen al día en cuanto el
+  // panel vuelve a verse (ver "visibilitychange" más abajo).
+  if (document.hidden) {
+    state.statsStale = true;
+    return;
+  }
+  state.statsStale = false;
 
   const cutoff = new Date(Date.now() - 60 * 1000).toISOString();
-  const { count: online } = await supabaseClient
-    .from("bt_presence")
-    .select("viewer_id", { count: "exact", head: true })
-    .gte("last_ping", cutoff);
 
-  const { count: activeChannels } = await supabaseClient
-    .from("bt_channels")
-    .select("id", { count: "exact", head: true })
-    .eq("is_broken", false);
+  // Todas las preguntas se hacen A LA VEZ (antes iban una detrás de otra
+  // y había que esperar la suma de todas).
+  const [registeredRes, onlineRes, activeRes, lastCheckRes, hiddenRes, lastRunRes] = await Promise.all([
+    supabaseClient
+      .from("bt_viewers")
+      .select("id", { count: "exact", head: true }),
+    supabaseClient
+      .from("bt_presence")
+      .select("viewer_id", { count: "exact", head: true })
+      .gte("last_ping", cutoff),
+    supabaseClient
+      .from("bt_channels")
+      .select("id", { count: "exact", head: true })
+      .eq("is_broken", false),
+    // Prueba real de que la comprobación automática de canales se ha
+    // ejecutado de verdad: se busca la fecha más reciente guardada en
+    // "last_checked_at" (el sistema automático la pone en TODOS los
+    // canales cada vez que se ejecuta, hayan cambiado de estado o no).
+    // Así no hay que fiarse solo de que todo salga en verde.
+    supabaseClient
+      .from("bt_channels")
+      .select("last_checked_at")
+      .not("last_checked_at", "is", null)
+      .order("last_checked_at", { ascending: false })
+      .limit(1),
+    // Canales ocultos en la app porque están caídos.
+    supabaseClient
+      .from("bt_channels")
+      .select("id", { count: "exact", head: true })
+      .eq("is_broken", true),
+    // La última pasada TERMINADA de la vigilancia de cada hora, para saber
+    // cuánto tardó. Si todavía no existe la tabla, simplemente sale "—".
+    supabaseClient
+      .from("bt_health_runs")
+      .select("started_at, finished_at")
+      .not("finished_at", "is", null)
+      .order("started_at", { ascending: false })
+      .limit(1),
+  ]);
 
-  el("stat-registered").textContent = registered ?? "—";
-  el("stat-online").textContent = online ?? "—";
-  el("stat-channels").textContent = activeChannels ?? "—";
+  el("stat-registered").textContent = registeredRes.count ?? "—";
+  el("stat-online").textContent = onlineRes.count ?? "—";
+  el("stat-channels").textContent = activeRes.count ?? "—";
+  el("stat-hidden").textContent = hiddenRes.count ?? "—";
 
-  // Prueba real de que la comprobación automática de canales se ha
-  // ejecutado de verdad: se busca la fecha más reciente guardada en
-  // "last_checked_at" (el sistema automático la pone en TODOS los
-  // canales cada vez que se ejecuta, hayan cambiado de estado o no).
-  // Así no hay que fiarse solo de que todo salga en verde.
-  const { data: lastCheckRows } = await supabaseClient
-    .from("bt_channels")
-    .select("last_checked_at")
-    .not("last_checked_at", "is", null)
-    .order("last_checked_at", { ascending: false })
-    .limit(1);
+  // Porcentaje de canales que funcionan: activos / (activos + ocultos).
+  const active = activeRes.count;
+  const hidden = hiddenRes.count;
+  el("stat-working-share").textContent =
+    active != null && hidden != null && active + hidden > 0
+      ? `${Math.round((active / (active + hidden)) * 100)} %`
+      : "—";
 
+  const lastRun = !lastRunRes.error && lastRunRes.data && lastRunRes.data[0];
+  el("stat-check-duration").textContent = lastRun
+    ? formatDuration(new Date(lastRun.finished_at) - new Date(lastRun.started_at))
+    : isMissingSqlError(lastRunRes.error)
+      ? "Falta activar el SQL"
+      : "—";
+
+  const lastCheckRows = lastCheckRes.data;
   el("stat-last-check").textContent = formatLastCheck(
     lastCheckRows && lastCheckRows[0] ? lastCheckRows[0].last_checked_at : null
   );
+}
+
+// Al volver al panel (si se saltó alguna actualización mientras estaba
+// escondido) se refrescan los números una vez, sin esperar 15 segundos.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && state.statsTimer && state.statsStale) refreshStats();
+});
+
+/* "3 min 20 s", "45 s", "1 h 5 min"… */
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const totalSec = Math.round(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const sec = totalSec % 60;
+  if (h) return `${h} h ${m} min`;
+  if (m) return `${m} min ${sec} s`;
+  return `${sec} s`;
 }
 
 function formatLastCheck(iso) {
@@ -180,27 +299,25 @@ async function loadChannels() {
   // Supabase solo entrega 1000 filas como máximo por cada petición.
   // Como ya hemos pasado de 1000 canales, pedimos la lista por partes
   // (de 1000 en 1000) hasta traerlos todos, en vez de una sola vez.
-  const pageSize = 1000;
-  let all = [];
-  let from = 0;
-  while (true) {
-    const { data, error } = await supabaseClient
+  // Se ordena también por "id": muchos canales comparten número (cada
+  // país empieza en el 1) y, sin un orden fijo, una parte podía repetir
+  // canales de la anterior y saltarse otros.
+  const { data: all, error } = await fetchAllPages((from, to) =>
+    supabaseClient
       .from("bt_channels")
       .select("*")
       .order("channel_number", { ascending: true, nullsFirst: false })
-      .range(from, from + pageSize - 1);
-
-    if (error) {
-      el("channels-status").textContent = "Error al cargar: " + error.message;
-      return;
-    }
-    all = all.concat(data || []);
-    if (!data || data.length < pageSize) break;
-    from += pageSize;
+      .order("id", { ascending: true })
+      .range(from, to)
+  );
+  if (error) {
+    el("channels-status").textContent = "Error al cargar: " + error.message;
+    return;
   }
 
   state.channels = all;
   state.selectedIds.clear();
+  el("select-all").checked = false;
   updateBulkBar();
   renderChannels();
   el("channels-status").textContent = state.channels.length
@@ -256,9 +373,14 @@ function renderChannels() {
     return;
   }
 
-  let html = "";
+  // Solo se pintan las primeras "channelRenderLimit" filas. Las cabeceras
+  // de cada país siguen diciendo cuántos canales tiene el país entero.
+  const limit = state.channelRenderLimit;
+  let shown = 0;
+  const parts = [];
   for (const group of groups) {
-    html += `
+    if (shown >= limit) break;
+    parts.push(`
       <tr class="group-header">
         <td colspan="7">
           <div class="group-header-inner">
@@ -268,9 +390,11 @@ function renderChannels() {
             <button class="btn danger" data-delete-country="${escapeHtml(group.category)}">🗑 Borrar país entero</button>
           </div>
         </td>
-      </tr>`;
+      </tr>`);
 
-    group.items.forEach((c, idx) => {
+    for (let idx = 0; idx < group.items.length && shown < limit; idx++) {
+      const c = group.items[idx];
+      shown += 1;
       const statusHtml = c.is_broken
         ? '<span class="status-broken">⚠ Caído</span>'
         : '<span class="status-ok">● OK</span>';
@@ -278,55 +402,102 @@ function renderChannels() {
       // el logo cuando esa fila está a punto de verse en pantalla, en
       // vez de intentar cargar miles de imágenes todas a la vez (que
       // es lo que estaba poniendo lento/congelado el panel).
-      const logoHtml = c.logo_url
+      const logoHtml = safeHttpUrl(c.logo_url)
         ? `<img class="channel-logo" loading="lazy" src="${escapeHtml(c.logo_url)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'channel-logo empty',textContent:'—'}))" />`
         : `<span class="channel-logo empty">—</span>`;
 
-      html += `
+      parts.push(`
         <tr>
-          <td><input type="checkbox" class="row-check" data-id="${c.id}" ${
-        state.selectedIds.has(c.id) ? "checked" : ""
+          <td><input type="checkbox" class="row-check" data-id="${escapeHtml(c.id)}" ${
+        state.selectedIds.has(String(c.id)) ? "checked" : ""
       } /></td>
           <td>${idx + 1}</td>
           <td>${logoHtml}</td>
           <td class="name-cell" dir="auto">${escapeHtml(c.name)}</td>
           <td>${statusHtml}</td>
-          <td><a class="link-icon" href="${c.stream_url}" target="_blank" rel="noopener">ver enlace</a></td>
+          <td>${
+        safeHttpUrl(c.stream_url)
+          ? `<a class="link-icon" href="${escapeHtml(c.stream_url)}" target="_blank" rel="noopener">ver enlace</a>`
+          : '<span class="status-broken">enlace no válido</span>'
+      }</td>
           <td>
-            <button class="btn" data-edit="${c.id}">✏️ Editar</button>
-            <button class="btn danger" data-delete="${c.id}">Borrar</button>
+            <button class="btn" data-edit="${escapeHtml(c.id)}">✏️ Editar</button>
+            <button class="btn danger" data-delete="${escapeHtml(c.id)}">Borrar</button>
           </td>
-        </tr>`;
-    });
+        </tr>`);
+    }
   }
 
-  el("channels-tbody").innerHTML = html;
+  const remaining = filtered.length - shown;
+  if (remaining > 0) {
+    parts.push(`
+      <tr class="load-more-row">
+        <td colspan="7">
+          <button class="btn" data-show-more>Mostrar más (quedan ${remaining})</button>
+        </td>
+      </tr>`);
+  }
 
-  document.querySelectorAll(".row-check").forEach((cb) => {
-    cb.addEventListener("change", () => {
-      if (cb.checked) state.selectedIds.add(cb.dataset.id);
-      else state.selectedIds.delete(cb.dataset.id);
-      updateBulkBar();
-    });
-  });
-  document.querySelectorAll("[data-delete]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      if (!confirm("¿Borrar este canal? No se puede deshacer.")) return;
-      deleteChannels([btn.dataset.delete]);
-    });
-  });
-  document.querySelectorAll("[data-edit]").forEach((btn) => {
-    btn.addEventListener("click", () => openEditChannel(btn.dataset.edit));
-  });
-  document.querySelectorAll("[data-delete-country]").forEach((btn) => {
-    btn.addEventListener("click", () => deleteWholeCountry(btn.dataset.deleteCountry));
+  el("channels-tbody").innerHTML = parts.join("");
+}
+
+/* Un solo "escuchador" para toda la tabla de canales, en vez de uno por
+   cada botón y cada casilla. Antes, cada vez que se pintaba la tabla se
+   le colgaban miles de escuchadores nuevos a las filas, y eso también
+   hacía ir lento el panel. Ahora la tabla mira qué se ha tocado. */
+el("channels-tbody").addEventListener("change", (e) => {
+  const cb = e.target.closest(".row-check");
+  if (!cb) return;
+  if (cb.checked) state.selectedIds.add(cb.dataset.id);
+  else state.selectedIds.delete(cb.dataset.id);
+  updateBulkBar();
+});
+
+el("channels-tbody").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  if ("deleteCountry" in btn.dataset) {
+    deleteWholeCountry(btn.dataset.deleteCountry);
+  } else if ("delete" in btn.dataset) {
+    if (!confirm("¿Borrar este canal? No se puede deshacer.")) return;
+    deleteChannels([btn.dataset.delete]);
+  } else if ("edit" in btn.dataset) {
+    openEditChannel(btn.dataset.edit);
+  } else if ("showMore" in btn.dataset) {
+    state.channelRenderLimit += CHANNEL_PAGE;
+    renderChannels();
+  }
+});
+
+/* Marca o desmarca las casillas que ya están pintadas, sin volver a
+   pintar toda la tabla. */
+function syncRowChecks() {
+  document.querySelectorAll("#channels-tbody .row-check").forEach((cb) => {
+    cb.checked = state.selectedIds.has(cb.dataset.id);
   });
 }
 
-el("channel-search").addEventListener("input", (e) => {
-  state.channelSearch = e.target.value;
+// La búsqueda espera a que se deje de escribir un momento (200 ms) antes
+// de volver a pintar la lista: así no se repinta con cada letra.
+const searchChannelsSoon = debounce(() => {
+  state.channelSearch = el("channel-search").value;
+  state.channelRenderLimit = CHANNEL_PAGE;
   renderChannels();
-});
+}, 200);
+el("channel-search").addEventListener("input", searchChannelsSoon);
+
+/* Solo se aceptan enlaces que empiecen por http:// o https://. Las listas
+   M3U suelen venir de terceros: un enlace del tipo "javascript:..." metido
+   en la lista podría ejecutar código dentro del panel con tu sesión de
+   administrador (y desde aquí se puede borrar o cambiar todo). */
+function safeHttpUrl(str) {
+  try {
+    const u = new URL(String(str || "").trim());
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch (_err) {
+    return false;
+  }
+}
 
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (ch) => ({
@@ -334,10 +505,71 @@ function escapeHtml(str) {
   }[ch]));
 }
 
+/* Devuelve una versión de "fn" que solo se ejecuta cuando han pasado
+   "ms" milisegundos sin volver a llamarla (por ejemplo, cuando se deja
+   de escribir en un buscador). */
+function debounce(fn, ms) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
+/* Supabase entrega como mucho 1000 filas por petición. Esta función pide
+   una tabla entera por partes, de 1000 en 1000, hasta que no quedan más.
+   "makeQuery(from, to)" tiene que devolver la consulta ya con su .range(). */
+async function fetchAllPages(makeQuery, pageSize = 1000) {
+  const all = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await makeQuery(from, from + pageSize - 1);
+    if (error) return { data: all, error };
+    if (data) all.push(...data);
+    if (!data || data.length < pageSize) return { data: all, error: null };
+    from += pageSize;
+  }
+}
+
+/* "Vincular por código", "Listas automáticas" y el "Centro de control"
+   usan tablas y funciones nuevas de Supabase. Si todavía no se ha
+   ejecutado su archivo SQL, Supabase contesta que "no existen": en vez de
+   enseñar ese error técnico, se explica qué hay que hacer. */
+const SQL_MISSING_MSG =
+  "Esta función necesita activar antes el archivo SQL en Supabase " +
+  "(supabase/mejoras-subida-y-vinculacion.sql: cópialo en el SQL Editor y pulsa Run).";
+
+function isMissingSqlError(error) {
+  if (!error) return false;
+  const code = String(error.code || "");
+  if (["42P01", "42883", "PGRST202", "PGRST205"].includes(code)) return true;
+  return /does not exist|could not find|schema cache/i.test(String(error.message || ""));
+}
+
+function friendlyDbError(error) {
+  return isMissingSqlError(error) ? SQL_MISSING_MSG : String(error.message || error);
+}
+
+function formatDateTime(iso) {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("es-ES", {
+    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+}
+
 el("select-all").addEventListener("change", (e) => {
-  if (e.target.checked) state.channels.forEach((c) => state.selectedIds.add(c.id));
-  else state.selectedIds.clear();
-  renderChannels();
+  // Solo se marcan los canales que se ven ahora (los de la búsqueda).
+  // Antes se marcaban TODOS aunque hubiera una búsqueda escrita, y
+  // "Borrar seleccionados" borraba también canales que no se veían.
+  const needle = normalizeText(state.channelSearch);
+  // También se marcan los que todavía no se han pintado por "Mostrar más":
+  // cuentan como visibles porque coinciden con la búsqueda.
+  if (e.target.checked) {
+    state.channels.filter((c) => matchesSearch(c, needle)).forEach((c) => state.selectedIds.add(String(c.id)));
+  } else {
+    state.selectedIds.clear();
+  }
+  syncRowChecks();
   updateBulkBar();
 });
 
@@ -349,7 +581,8 @@ function updateBulkBar() {
 
 el("bulk-clear-btn").addEventListener("click", () => {
   state.selectedIds.clear();
-  renderChannels();
+  el("select-all").checked = false;
+  syncRowChecks();
   updateBulkBar();
 });
 
@@ -374,7 +607,7 @@ async function deleteWholeCountry(category) {
     `Vas a borrar TODO "${category}" (${items.length} canal${items.length === 1 ? "" : "es"}). Esto no se puede deshacer. ¿Seguro?`
   );
   if (!seguro) return;
-  await deleteChannels(items.map((c) => c.id));
+  await deleteChannels(items.map((c) => String(c.id)));
 }
 
 async function deleteChannels(ids) {
@@ -421,7 +654,7 @@ el("new-channel-btn").addEventListener("click", () => {
 });
 
 function openEditChannel(id) {
-  const channel = state.channels.find((c) => c.id === id);
+  const channel = state.channels.find((c) => String(c.id) === String(id));
   if (!channel) return;
   state.editingChannelId = id;
   el("channel-modal-title").textContent = "Editar canal";
@@ -463,6 +696,13 @@ el("channel-form").addEventListener("submit", async (e) => {
     stream_url: el("cf-src").value.trim(),
   };
 
+  if (!safeHttpUrl(payload.stream_url)) {
+    el("channel-form-error").textContent = "El enlace del canal tiene que empezar por http:// o https://";
+    el("channel-form-error").classList.remove("hidden");
+    return;
+  }
+  if (payload.logo_url && !safeHttpUrl(payload.logo_url)) payload.logo_url = null;
+
   if (typedNumber) {
     payload.channel_number = Number(typedNumber);
   } else if (!state.editingChannelId) {
@@ -500,18 +740,48 @@ el("channel-form").addEventListener("submit", async (e) => {
    algunos canales que SÍ funcionan en la app pueden aparecer como
    "no comprobado". Es una ayuda, no una garantía al 100%.
 
-   IMPORTANTE: los canales que de verdad fallan (respuesta HTTP con
-   error, no un simple bloqueo de CORS) se BORRAN para siempre de la
-   base de datos, no se dejan solo ocultos — igual que hace ahora la
-   comprobación automática de cada noche. También se borran aquí los
-   canales duplicados (mismo enlace de vídeo que otro ya guardado). */
+   Los canales que fallan (respuesta HTTP con error, no un simple bloqueo
+   de CORS) se MARCAN como caídos: la app de la tele deja de mostrarlos,
+   pero no se pierden. Muchos fallan solo desde aquí (bloqueo por país o
+   porque piden cabeceras especiales) y en la tele sí funcionan. La
+   comprobación automática de cada noche es la que los borra de verdad
+   cuando llevan 7 días seguidos caídos. Los canales duplicados (mismo
+   enlace de vídeo que otro ya guardado) sí se borran aquí. */
 el("check-channels-btn").addEventListener("click", async () => {
+  const checkBtn = el("check-channels-btn");
+  if (checkBtn.disabled) return;
+  checkBtn.disabled = true;
+  try {
+    await checkChannels();
+  } finally {
+    checkBtn.disabled = false;
+  }
+});
+
+async function deleteIdsInChunks(ids) {
+  for (let i = 0; i < ids.length; i += 200) {
+    const { error } = await supabaseClient.from("bt_channels").delete().in("id", ids.slice(i, i + 200));
+    if (error) throw error;
+  }
+}
+
+async function updateIdsInChunks(ids, values) {
+  for (let i = 0; i < ids.length; i += 200) {
+    const { error } = await supabaseClient.from("bt_channels").update(values).in("id", ids.slice(i, i + 200));
+    if (error) throw error;
+  }
+}
+
+async function checkChannels() {
   el("channels-status").textContent = "Comprobando canales, puede tardar un poco…";
 
   // 1) Duplicados exactos (mismo enlace de vídeo): se queda uno solo.
   const porEnlace = new Map();
   for (const c of state.channels) {
-    const clave = (c.stream_url || "").trim().toLowerCase();
+    // Sin pasar a minúsculas: dos enlaces que solo se distinguen en una
+    // mayúscula (muy habitual en los códigos de acceso de los enlaces) son
+    // canales distintos.
+    const clave = (c.stream_url || "").trim();
     if (!clave) continue;
     if (!porEnlace.has(clave)) porEnlace.set(clave, []);
     porEnlace.get(clave).push(c);
@@ -523,12 +793,17 @@ el("check-channels-btn").addEventListener("click", async () => {
       const aTieneNumero = a.channel_number == null ? 1 : 0;
       const bTieneNumero = b.channel_number == null ? 1 : 0;
       if (aTieneNumero !== bTieneNumero) return aTieneNumero - bTieneNumero;
-      return a.id.localeCompare ? a.id.localeCompare(b.id) : a.id - b.id;
+      return String(a.id).localeCompare(String(b.id));
     });
     for (const sobrante of ordenado.slice(1)) idsDuplicados.push(sobrante.id);
   }
-  if (idsDuplicados.length) {
-    await supabaseClient.from("bt_channels").delete().in("id", idsDuplicados);
+  try {
+    // En tandas de 200: con muchos duplicados, una sola petición era
+    // demasiado larga y fallaba sin avisar.
+    await deleteIdsInChunks(idsDuplicados);
+  } catch (err) {
+    el("channels-status").textContent = "No se pudieron borrar los duplicados: " + err.message;
+    return;
   }
   const idsDuplicadosSet = new Set(idsDuplicados);
   const canalesAComprobar = state.channels.filter((c) => !idsDuplicadosSet.has(c.id));
@@ -570,8 +845,12 @@ el("check-channels-btn").addEventListener("click", async () => {
       comprobableDeVerdad = false;
     } finally {
       clearTimeout(timeoutId);
+      // Cortamos la descarga en cuanto llega la respuesta: un canal en
+      // directo no termina nunca, y antes se quedaban 20 vídeos bajándose
+      // a la vez (gastando datos del móvil) hasta cerrar el panel.
+      controller.abort();
     }
-    if (comprobableDeVerdad && broken) {
+    if (comprobableDeVerdad && broken && !c.is_broken) {
       idsCaidos.push(c.id);
     } else if (comprobableDeVerdad && !broken && c.is_broken) {
       idsArreglados.push(c.id);
@@ -586,23 +865,22 @@ el("check-channels-btn").addEventListener("click", async () => {
     await Promise.all(tanda.map((c) => comprobarUno(c)));
   }
 
-  if (idsArreglados.length) {
+  try {
     // Estaban marcados como caídos de una comprobación anterior y ahora
-    // sí responden: se limpia la marca, todos de una vez.
-    await supabaseClient
-      .from("bt_channels")
-      .update({ is_broken: false, last_checked_at: new Date().toISOString() })
-      .in("id", idsArreglados);
-  }
-  if (idsCaidos.length) {
-    await supabaseClient.from("bt_channels").delete().in("id", idsCaidos);
+    // sí responden: se limpia la marca.
+    await updateIdsInChunks(idsArreglados, { is_broken: false, last_checked_at: new Date().toISOString() });
+    await updateIdsInChunks(idsCaidos, { is_broken: true });
+  } catch (err) {
+    el("channels-status").textContent = "No se pudo guardar el resultado: " + err.message;
+    return;
   }
 
   el("channels-status").textContent =
-    `Hecho: ${idsDuplicados.length} duplicados y ${idsCaidos.length} caídos borrados para siempre.`;
+    `Hecho: ${idsDuplicados.length} duplicados borrados, ${idsCaidos.length} canales marcados como caídos ` +
+    `y ${idsArreglados.length} que vuelven a funcionar.`;
   await loadChannels();
   await refreshStats();
-});
+}
 
 /* ---- Importar lista de canales (M3U / M3U8 / texto simple) ----
    Así no hay que añadir los canales uno a uno con un enlace: se
@@ -610,17 +888,20 @@ el("check-channels-btn").addEventListener("click", async () => {
 
 el("import-channels-btn").addEventListener("click", () => {
   el("import-file-input").value = "";
+  el("import-url-input").value = "";
+  el("import-xtream-server").value = "";
+  el("import-xtream-user").value = "";
+  el("import-xtream-pass").value = "";
   el("import-category-override").value = "";
   el("import-status").textContent = "";
-  el("import-preview-wrap").classList.add("hidden");
-  el("import-confirm-btn").classList.add("hidden");
+  hideImportPreview();
   el("import-error").classList.add("hidden");
   state.importItems = [];
   el("import-modal").classList.remove("hidden");
 });
 
 function parseChannelList(text) {
-  const lines = text.split(/\r?\n/);
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
   const items = [];
   let pending = null; // datos del #EXTINF que estamos esperando emparejar con su enlace
 
@@ -629,7 +910,7 @@ function parseChannelList(text) {
     if (!line) continue;
 
     if (line.toUpperCase().startsWith("#EXTINF")) {
-      const commaIdx = line.indexOf(",");
+      const commaIdx = firstCommaOutsideQuotes(line);
       const attrsPart = commaIdx >= 0 ? line.slice(0, commaIdx) : line;
       const namePart = commaIdx >= 0 ? line.slice(commaIdx + 1).trim() : "";
       const logoMatch = attrsPart.match(/tvg-logo="([^"]*)"/i);
@@ -656,49 +937,275 @@ function parseChannelList(text) {
   return items;
 }
 
+/* La coma que separa los datos del nombre en #EXTINF es la primera que
+   NO está entre comillas: tvg-name="Noticias, 24h" lleva una coma dentro
+   y antes cortaba el nombre del canal por ahí. */
+function firstCommaOutsideQuotes(line) {
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '"') inQuotes = !inQuotes;
+    else if (line[i] === "," && !inQuotes) return i;
+  }
+  return -1;
+}
+
 el("import-file-input").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
-  const text = await file.text();
-  const items = parseChannelList(text).filter((it) => it.streamUrl);
+  showImportPreview(await file.text());
+});
+
+/* Descarga el texto de una lista. Dentro de la app del panel se usa la
+   descarga de Android (window.BoughaziNative), porque el navegador
+   interno no deja leer listas de webs que no lo autorizan (CORS). En un
+   navegador normal se usa fetch. */
+let nativeDownloadSeq = 0;
+const nativeDownloads = new Map();
+window.onNativeDownload = (id, ok, payload) => {
+  const pending = nativeDownloads.get(id);
+  if (!pending) return;
+  nativeDownloads.delete(id);
+  if (ok) pending.resolve(payload);
+  else pending.reject(new Error(payload));
+};
+
+async function downloadListText(url) {
+  if (window.BoughaziNative && window.BoughaziNative.downloadText) {
+    const id = ++nativeDownloadSeq;
+    return new Promise((resolve, reject) => {
+      nativeDownloads.set(id, { resolve, reject });
+      window.BoughaziNative.downloadText(id, url);
+    });
+  }
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`el servidor ha contestado con el error ${res.status}`);
+    return await res.text();
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error("tarda demasiado (más de 1 minuto)");
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/* Importar desde un enlace: el panel descarga la lista él mismo, sin
+   tener que guardarla antes como archivo en el móvil. */
+el("import-url-btn").addEventListener("click", async () => {
+  const url = el("import-url-input").value.trim();
+  if (!safeHttpUrl(url)) {
+    el("import-status").textContent = "El enlace de la lista tiene que empezar por http:// o https://";
+    return;
+  }
+  const btn = el("import-url-btn");
+  btn.disabled = true;
+  el("import-status").textContent = "Descargando la lista…";
+  try {
+    showImportPreview(await downloadListText(url));
+  } catch (err) {
+    el("import-status").textContent = `No se pudo descargar la lista: ${err.message}`;
+    hideImportPreview();
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/* ---- Importar desde Xtream Codes ----
+   Muchos proveedores no dan un enlace M3U sino tres datos: la dirección
+   del servidor, un usuario y una contraseña. Con ellos se le pide al
+   servidor (por su "player_api.php") la lista de categorías y la de
+   canales en directo, y se convierten en canales normales del panel. */
+
+/* Deja la dirección del servidor limpia: sin espacios, sin barra al final
+   y sin "/player_api.php" o "/get.php" si se ha pegado el enlace entero.
+   Tiene que empezar por http:// o https://; si no, devuelve null. */
+function normalizeXtreamServer(str) {
+  const raw = String(str || "").trim();
+  if (!/^https?:\/\//i.test(raw) || !safeHttpUrl(raw)) return null;
+  const u = new URL(raw);
+  const path = u.pathname.replace(/\/(player_api|get|xmltv)\.php$/i, "").replace(/\/+$/, "");
+  return u.origin + path;
+}
+
+function xtreamApiUrl(server, user, pass, action) {
+  return (
+    `${server}/player_api.php?username=${encodeURIComponent(user)}` +
+    `&password=${encodeURIComponent(pass)}&action=${action}`
+  );
+}
+
+/* Lee la respuesta del servidor Xtream. Si no es JSON, la dirección no es
+   la de un servidor Xtream (o el servidor ha contestado con una página de
+   error). Si trae "user_info.auth = 0", el usuario o la contraseña están mal. */
+function parseXtreamResponse(text) {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (_err) {
+    throw new Error(
+      "el servidor no ha contestado como un servidor Xtream. Revisa la dirección, el usuario y la contraseña."
+    );
+  }
+  if (data && !Array.isArray(data) && data.user_info && Number(data.user_info.auth) === 0) {
+    throw new Error("el usuario o la contraseña no son correctos (el servidor no deja entrar).");
+  }
+  return data;
+}
+
+/* Convierte las listas del servidor Xtream en canales con el mismo formato
+   que los de un M3U: { name, category, logoUrl, streamUrl }. */
+function xtreamStreamsToItems(server, user, pass, categories, streams) {
+  const categoryNames = new Map();
+  for (const cat of Array.isArray(categories) ? categories : []) {
+    if (cat && cat.category_id != null) {
+      categoryNames.set(String(cat.category_id), String(cat.category_name || "").trim());
+    }
+  }
+  return (Array.isArray(streams) ? streams : [])
+    .filter((st) => st && st.stream_id != null && String(st.stream_id).trim() !== "")
+    .map((st, i) => ({
+      name: String(st.name || "").trim() || `Canal ${i + 1}`,
+      category: categoryNames.get(String(st.category_id)) || "",
+      logoUrl: String(st.stream_icon || "").trim(),
+      streamUrl:
+        `${server}/live/${encodeURIComponent(user)}/${encodeURIComponent(pass)}/` +
+        `${encodeURIComponent(String(st.stream_id).trim())}.m3u8`,
+    }));
+}
+
+async function downloadXtreamChannels(server, user, pass, onProgress) {
+  onProgress("Conectando con el servidor Xtream…");
+  // Primero las categorías: si el usuario o la contraseña están mal, se
+  // sabe ya aquí y no se pierde tiempo bajando la lista de canales.
+  const categories = parseXtreamResponse(
+    await downloadListText(xtreamApiUrl(server, user, pass, "get_live_categories"))
+  );
+  onProgress("Descargando la lista de canales… (con listas grandes puede tardar un poco)");
+  const streams = parseXtreamResponse(
+    await downloadListText(xtreamApiUrl(server, user, pass, "get_live_streams"))
+  );
+  if (!Array.isArray(streams)) {
+    throw new Error("el servidor ha contestado algo inesperado en vez de la lista de canales.");
+  }
+  return xtreamStreamsToItems(server, user, pass, categories, streams);
+}
+
+el("import-xtream-btn").addEventListener("click", async () => {
+  const server = normalizeXtreamServer(el("import-xtream-server").value);
+  const user = el("import-xtream-user").value.trim();
+  const pass = el("import-xtream-pass").value.trim();
+  if (!server) {
+    el("import-status").textContent =
+      "La dirección del servidor tiene que empezar por http:// o https:// (por ejemplo: http://servidor.com:8080)";
+    return;
+  }
+  if (!user || !pass) {
+    el("import-status").textContent = "Escribe el usuario y la contraseña de Xtream.";
+    return;
+  }
+  const btn = el("import-xtream-btn");
+  btn.disabled = true;
+  try {
+    const items = await downloadXtreamChannels(server, user, pass, (msg) => {
+      el("import-status").textContent = msg;
+    });
+    showImportItems(items);
+  } catch (err) {
+    el("import-status").textContent = `No se pudo cargar la lista Xtream: ${err.message}`;
+    hideImportPreview();
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function hideImportPreview() {
+  el("import-preview-wrap").classList.add("hidden");
+  el("import-confirm-btn").classList.add("hidden");
+}
+
+/* Muestra la vista previa a partir del texto de un M3U (archivo o enlace). */
+function showImportPreview(text) {
+  showImportItems(parseChannelList(text));
+}
+
+/* Muestra la vista previa a partir de canales ya leídos, vengan de un M3U
+   o de un servidor Xtream: { name, category, logoUrl, streamUrl }. */
+function showImportItems(parsedItems) {
+  const parsed = parsedItems.filter((it) => it.streamUrl);
+  // Se descartan los enlaces que no son http:// ni https:// (ver safeHttpUrl).
+  const valid = parsed.filter((it) => safeHttpUrl(it.streamUrl));
+  const skipped = parsed.length - valid.length;
+  // Y los que ya están en el panel o se repiten dentro de la misma lista,
+  // para no llenar la lista de canales duplicados.
+  const seen = new Set(state.channels.map((c) => String(c.stream_url || "").trim()));
+  const items = valid.filter((it) => {
+    const key = it.streamUrl.trim();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const duplicates = valid.length - items.length;
 
   if (!items.length) {
-    el("import-status").textContent = "No se ha encontrado ningún canal en ese archivo. Comprueba que sea un M3U válido.";
-    el("import-preview-wrap").classList.add("hidden");
-    el("import-confirm-btn").classList.add("hidden");
+    el("import-status").textContent = duplicates
+      ? `Todos los canales de esta lista (${duplicates}) ya están en el panel.`
+      : "No se ha encontrado ningún canal en esta lista. Comprueba que sea un M3U válido.";
+    hideImportPreview();
     return;
   }
 
   state.importItems = items.map((it, i) => ({ ...it, id: i, selected: true }));
-  el("import-status").textContent = `${items.length} canal(es) encontrados. Quita el visto de los que no quieras subir y toca "Importar".`;
+  state.importRenderLimit = IMPORT_PAGE;
+  el("import-status").textContent =
+    `${items.length} canal(es) nuevos encontrados. Quita el visto de los que no quieras subir y toca "Importar".` +
+    (skipped ? ` (Se han descartado ${skipped} con un enlace no válido.)` : "") +
+    (duplicates ? ` (Se han quitado ${duplicates} que ya estaban o se repetían.)` : "");
   renderImportPreview();
   el("import-preview-wrap").classList.remove("hidden");
   el("import-select-all").checked = true;
   el("import-confirm-btn").classList.remove("hidden");
   updateImportConfirmLabel();
-});
+}
 
+/* Igual que en la tabla de canales: con listas de miles de canales (las de
+   Xtream suelen serlo) solo se pintan los primeros y un "Mostrar más".
+   La casilla de "todos" sigue marcando o desmarcando la lista ENTERA. */
 function renderImportPreview() {
   const override = el("import-category-override").value.trim();
-  el("import-preview-tbody").innerHTML = state.importItems
-    .map(
-      (it) => `
+  const visible = state.importItems.slice(0, state.importRenderLimit);
+  const remaining = state.importItems.length - visible.length;
+  el("import-preview-tbody").innerHTML =
+    visible
+      .map(
+        (it) => `
         <tr>
           <td><input type="checkbox" class="import-row-check" data-id="${it.id}" ${it.selected ? "checked" : ""} /></td>
-          <td>${escapeHtml(it.name)}</td>
-          <td>${escapeHtml(override || it.category || "")}</td>
+          <td dir="auto">${escapeHtml(it.name)}</td>
+          <td dir="auto">${escapeHtml(override || it.category || "")}</td>
         </tr>`
-    )
-    .join("");
-
-  document.querySelectorAll(".import-row-check").forEach((cb) => {
-    cb.addEventListener("change", () => {
-      const item = state.importItems.find((it) => String(it.id) === cb.dataset.id);
-      if (item) item.selected = cb.checked;
-      updateImportConfirmLabel();
-    });
-  });
+      )
+      .join("") +
+    (remaining > 0
+      ? `<tr class="load-more-row"><td colspan="3"><button class="btn" type="button" data-show-more>Mostrar más (quedan ${remaining})</button></td></tr>`
+      : "");
 }
+
+// Un solo escuchador para toda la vista previa (ver la tabla de canales).
+el("import-preview-tbody").addEventListener("change", (e) => {
+  const cb = e.target.closest(".import-row-check");
+  if (!cb) return;
+  const item = state.importItems[Number(cb.dataset.id)];
+  if (item) item.selected = cb.checked;
+  updateImportConfirmLabel();
+});
+
+el("import-preview-tbody").addEventListener("click", (e) => {
+  if (!e.target.closest("[data-show-more]")) return;
+  state.importRenderLimit += IMPORT_PAGE;
+  renderImportPreview();
+});
 
 function updateImportConfirmLabel() {
   const n = state.importItems.filter((it) => it.selected).length;
@@ -739,24 +1246,33 @@ el("import-confirm-btn").addEventListener("click", async () => {
       channel_number: numeroSiguiente(categoriaFinal),
       name: it.name,
       category: categoriaFinal,
-      logo_url: it.logoUrl || null,
+      logo_url: safeHttpUrl(it.logoUrl) ? it.logoUrl : null,
       stream_url: it.streamUrl,
     };
   });
 
   el("import-confirm-btn").disabled = true;
-  el("import-confirm-btn").textContent = "Importando…";
   el("import-error").classList.add("hidden");
 
-  const { error } = await supabaseClient.from("bt_channels").insert(rows);
+  // Se suben en tandas de 500: con listas de miles de canales, una sola
+  // petición enorme podía fallar y no se subía ninguno.
+  const chunkSize = 500;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    el("import-confirm-btn").textContent = `Importando… ${Math.min(i + chunkSize, rows.length)}/${rows.length}`;
+    const { error } = await supabaseClient.from("bt_channels").insert(rows.slice(i, i + chunkSize));
+    if (error) {
+      el("import-confirm-btn").disabled = false;
+      el("import-error").textContent =
+        `No se pudo importar a partir del canal ${i + 1}: ${error.message}` +
+        (i ? ` (los ${i} primeros sí se han subido)` : "");
+      el("import-error").classList.remove("hidden");
+      updateImportConfirmLabel();
+      await loadChannels();
+      return;
+    }
+  }
 
   el("import-confirm-btn").disabled = false;
-  if (error) {
-    el("import-error").textContent = "No se pudo importar: " + error.message;
-    el("import-error").classList.remove("hidden");
-    updateImportConfirmLabel();
-    return;
-  }
 
   el("import-modal").classList.add("hidden");
   await loadChannels();
@@ -770,16 +1286,27 @@ el("import-confirm-btn").addEventListener("click", async () => {
 function generateCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // sin caracteres confusos
   let out = "";
-  for (let i = 0; i < 8; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  // crypto.getRandomValues: aleatorio de verdad, no se puede adivinar.
+  // 256 es múltiplo de 32 (las letras posibles), así que no hay sesgo.
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  for (let i = 0; i < 8; i++) out += chars[bytes[i] % chars.length];
   return out;
 }
 
 async function loadCodes() {
-  const { data, error } = await supabaseClient
-    .from("bt_access_codes")
-    .select("*")
-    .order("created_at", { ascending: false });
-  if (error) return;
+  // Por partes de 1000 en 1000, como los canales (ver fetchAllPages).
+  const { data, error } = await fetchAllPages((from, to) =>
+    supabaseClient
+      .from("bt_access_codes")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: true })
+      .range(from, to)
+  );
+  if (error) {
+    el("codes-tbody").innerHTML = `<tr><td colspan="5" class="error-text">Error al cargar: ${escapeHtml(error.message)}</td></tr>`;
+    return;
+  }
   el("codes-tbody").innerHTML = data
     .map((code) => {
       const statusHtml = code.used_by_email
@@ -787,23 +1314,24 @@ async function loadCodes() {
         : '<span class="status-ok">Libre</span>';
       return `
         <tr>
-          <td>${code.code}</td>
+          <td>${escapeHtml(code.code)}</td>
           <td>${escapeHtml(code.label || "")}</td>
           <td>${statusHtml}</td>
           <td>${escapeHtml(code.used_by_email || "—")}</td>
-          <td><button class="btn danger" data-del-code="${code.id}">Borrar</button></td>
+          <td><button class="btn danger" data-del-code="${escapeHtml(code.id)}">Borrar</button></td>
         </tr>`;
     })
     .join("");
-
-  document.querySelectorAll("[data-del-code]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      if (!confirm("¿Borrar este código?")) return;
-      await supabaseClient.from("bt_access_codes").delete().eq("id", btn.dataset.delCode);
-      loadCodes();
-    });
-  });
 }
+
+el("codes-tbody").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-del-code]");
+  if (!btn) return;
+  if (!confirm("¿Borrar este código?")) return;
+  const { error } = await supabaseClient.from("bt_access_codes").delete().eq("id", btn.dataset.delCode);
+  if (error) alert("No se pudo borrar el código: " + error.message);
+  loadCodes();
+});
 
 let pendingCodeId = null;
 
@@ -841,10 +1369,16 @@ let allUsers = [];
 
 async function loadUsers() {
   el("users-tbody").innerHTML = `<tr><td colspan="5" class="muted">Cargando usuarios…</td></tr>`;
-  const { data, error } = await supabaseClient
-    .from("bt_viewers")
-    .select("*")
-    .order("created_at", { ascending: false });
+  // Por partes de 1000 en 1000: con más de 1000 usuarios, antes solo se
+  // veían los 1000 más recientes.
+  const { data, error } = await fetchAllPages((from, to) =>
+    supabaseClient
+      .from("bt_viewers")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: true })
+      .range(from, to)
+  );
   if (error) {
     el("users-tbody").innerHTML = `<tr><td colspan="5" class="error-text">Error al cargar: ${escapeHtml(error.message)}</td></tr>`;
     return;
@@ -883,51 +1417,50 @@ function renderUsers() {
       (u) => `
         <tr>
           <td dir="auto">${escapeHtml(u.email || "—")}</td>
-          <td>${formatDateOnly(u.created_at)}</td>
+          <td>${escapeHtml(formatDateOnly(u.created_at))}</td>
           <td>${escapeHtml(u.linked_code || "—")}</td>
           <td>${accessStatusHtml(u.access_expires_at)}</td>
           <td>
             <div class="user-time-actions">
-              <button class="btn" data-add-month="${u.id}">+1 mes</button>
-              <button class="btn" data-add-year="${u.id}">+1 año</button>
-              <input type="date" data-date-input="${u.id}" />
-              <button class="btn" data-set-date="${u.id}">Fijar fecha</button>
-              <button class="btn" data-clear-expiry="${u.id}">Quitar caducidad</button>
+              <button class="btn" data-add-month="${escapeHtml(u.id)}">+1 mes</button>
+              <button class="btn" data-add-year="${escapeHtml(u.id)}">+1 año</button>
+              <input type="date" data-date-input="${escapeHtml(u.id)}" />
+              <button class="btn" data-set-date="${escapeHtml(u.id)}">Fijar fecha</button>
+              <button class="btn" data-clear-expiry="${escapeHtml(u.id)}">Quitar caducidad</button>
             </div>
           </td>
         </tr>`
     )
     .join("");
-
-  document.querySelectorAll("[data-add-month]").forEach((btn) => {
-    btn.addEventListener("click", () => addTimeToUser(btn.dataset.addMonth, 30));
-  });
-  document.querySelectorAll("[data-add-year]").forEach((btn) => {
-    btn.addEventListener("click", () => addTimeToUser(btn.dataset.addYear, 365));
-  });
-  document.querySelectorAll("[data-set-date]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const id = btn.dataset.setDate;
-      const input = document.querySelector(`[data-date-input="${id}"]`);
-      if (!input || !input.value) {
-        alert("Elige primero una fecha en la casilla de al lado.");
-        return;
-      }
-      setUserExpiry(id, new Date(input.value + "T23:59:59").toISOString());
-    });
-  });
-  document.querySelectorAll("[data-clear-expiry]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      if (!confirm("¿Quitar la caducidad? Esta persona tendrá acceso sin límite de tiempo.")) return;
-      setUserExpiry(btn.dataset.clearExpiry, null);
-    });
-  });
 }
 
-el("user-search").addEventListener("input", (e) => {
-  state.userSearch = e.target.value;
-  renderUsers();
+// Un solo escuchador para toda la tabla de usuarios.
+el("users-tbody").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  if ("addMonth" in btn.dataset) {
+    addTimeToUser(btn.dataset.addMonth, 30);
+  } else if ("addYear" in btn.dataset) {
+    addTimeToUser(btn.dataset.addYear, 365);
+  } else if ("setDate" in btn.dataset) {
+    const input = btn.closest("tr").querySelector("[data-date-input]");
+    if (!input || !input.value) {
+      alert("Elige primero una fecha en la casilla de al lado.");
+      return;
+    }
+    setUserExpiry(btn.dataset.setDate, new Date(input.value + "T23:59:59").toISOString());
+  } else if ("clearExpiry" in btn.dataset) {
+    if (!confirm("¿Quitar la caducidad? Esta persona tendrá acceso sin límite de tiempo.")) return;
+    setUserExpiry(btn.dataset.clearExpiry, null);
+  }
 });
+
+// Igual que en canales: se espera a que se deje de escribir (200 ms).
+const searchUsersSoon = debounce(() => {
+  state.userSearch = el("user-search").value;
+  renderUsers();
+}, 200);
+el("user-search").addEventListener("input", searchUsersSoon);
 
 /* Añade N días a partir de HOY (no a partir de la fecha que ya
    tuviera antes), para que "+1 mes" siempre signifique "un mes
@@ -948,5 +1481,511 @@ async function setUserExpiry(viewerId, isoOrNull) {
   }
   await loadUsers();
 }
+
+/* ------------------------------------------------------------ */
+/* Listas: campos comunes (enlace M3U o Xtream Codes)             */
+/* ------------------------------------------------------------ */
+/* "Vincular por código" y "Listas automáticas" piden lo mismo: o un
+   enlace M3U, o los tres datos de Xtream. Los campos de cada formulario
+   se llaman igual cambiando solo el principio ("pair-…" o "auto-…"), así
+   que estas funciones sirven para los dos. */
+
+function updatePlaylistFields(prefix) {
+  const isXtream = el(`${prefix}-type`).value === "xtream";
+  el(`${prefix}-m3u-fields`).classList.toggle("hidden", isXtream);
+  el(`${prefix}-xtream-fields`).classList.toggle("hidden", !isXtream);
+}
+
+["pair", "auto"].forEach((prefix) => {
+  el(`${prefix}-type`).addEventListener("change", () => updatePlaylistFields(prefix));
+});
+
+/* Lee y comprueba los campos. Devuelve { error } si falta algo, o
+   { type, url, server, username, password } con lo que no toca a null. */
+function readPlaylistFields(prefix) {
+  const type = el(`${prefix}-type`).value;
+  if (type === "xtream") {
+    const server = normalizeXtreamServer(el(`${prefix}-xtream-server`).value);
+    const username = el(`${prefix}-xtream-user`).value.trim();
+    const password = el(`${prefix}-xtream-pass`).value.trim();
+    if (!server) {
+      return { error: "La dirección del servidor tiene que empezar por http:// o https:// (por ejemplo: http://servidor.com:8080)" };
+    }
+    if (!username || !password) return { error: "Escribe el usuario y la contraseña de Xtream." };
+    return { type, url: null, server, username, password };
+  }
+  const url = el(`${prefix}-url`).value.trim();
+  if (!safeHttpUrl(url)) return { error: "El enlace de la lista tiene que empezar por http:// o https://" };
+  return { type: "m3u", url, server: null, username: null, password: null };
+}
+
+function fillPlaylistFields(prefix, list) {
+  el(`${prefix}-type`).value = list.type === "xtream" ? "xtream" : "m3u";
+  el(`${prefix}-url`).value = list.url || "";
+  el(`${prefix}-xtream-server`).value = list.server || "";
+  el(`${prefix}-xtream-user`).value = list.username || "";
+  el(`${prefix}-xtream-pass`).value = list.password || "";
+  updatePlaylistFields(prefix);
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch (_err) {
+    return "—";
+  }
+}
+
+/* Texto corto para las tablas. Nunca lleva la contraseña de Xtream, y del
+   enlace M3U solo se enseña la web (muchos llevan el usuario y la
+   contraseña metidos dentro del propio enlace). */
+function describePlaylist(type, url, server, username) {
+  if (type === "xtream") return `Xtream · ${username || "—"} @ ${hostOf(server)}`;
+  if (type === "m3u") return `Enlace M3U · ${hostOf(url)}`;
+  return "—";
+}
+
+/* ------------------------------------------------------------ */
+/* Vincular por código                                            */
+/* ------------------------------------------------------------ */
+/* La tele enseña un código; aquí se escribe ese código junto con la lista
+   que tiene que ver, y la tele la recibe sola en unos segundos. */
+
+function setPairStatus(text, kind) {
+  const p = el("pair-status");
+  p.textContent = text;
+  p.classList.toggle("error-text", kind === "error");
+  p.classList.toggle("success-text", kind === "ok");
+}
+
+/* Los códigos van en mayúsculas y sin espacios ni guiones, aunque se
+   escriban como "abcd-2345" o "ABCD 2345". */
+function normalizePairCode(str) {
+  return String(str || "").toUpperCase().replace(/[\s-]+/g, "").trim();
+}
+
+el("pair-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const code = normalizePairCode(el("pair-code").value);
+  if (!code) {
+    setPairStatus("Escribe el código que sale en la pantalla de la tele.", "error");
+    return;
+  }
+  const list = readPlaylistFields("pair");
+  if (list.error) {
+    setPairStatus(list.error, "error");
+    return;
+  }
+  const label = el("pair-label").value.trim() || null;
+
+  const btn = el("pair-submit");
+  btn.disabled = true;
+  setPairStatus("Enviando la lista a la tele…");
+  const { data: found, error } = await supabaseClient.rpc("bt_pairing_send", {
+    p_code: code,
+    p_playlist_type: list.type,
+    p_playlist_url: list.url,
+    p_xtream_server: list.server,
+    p_xtream_username: list.username,
+    p_xtream_password: list.password,
+    p_label: label,
+  });
+  btn.disabled = false;
+
+  if (error) {
+    setPairStatus("No se pudo enviar: " + friendlyDbError(error), "error");
+    return;
+  }
+  if (!found) {
+    setPairStatus(
+      `Código no encontrado o caducado (${code}). Comprueba que esté bien escrito; si la tele lleva más de 30 minutos con el mismo código, pide uno nuevo en la tele.`,
+      "error"
+    );
+    return;
+  }
+  setPairStatus(`¡Hecho! La tele con el código ${code} recibirá la lista en unos segundos.`, "ok");
+  el("pair-form").reset();
+  updatePlaylistFields("pair");
+  loadPairings();
+});
+
+async function loadPairings() {
+  const tbody = el("pairings-tbody");
+  tbody.innerHTML = `<tr><td colspan="5" class="muted">Cargando teles vinculadas…</td></tr>`;
+  const { data, error } = await fetchAllPages((from, to) =>
+    supabaseClient
+      .from("bt_pairings")
+      .select("*")
+      .not("playlist_type", "is", null)
+      .order("updated_at", { ascending: false })
+      .order("code", { ascending: true })
+      .range(from, to)
+  );
+  if (error) {
+    tbody.innerHTML = `<tr><td colspan="5" class="error-text">${escapeHtml(friendlyDbError(error))}</td></tr>`;
+    return;
+  }
+  state.pairings = data;
+  renderPairings();
+}
+
+function renderPairings() {
+  const tbody = el("pairings-tbody");
+  if (!state.pairings.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">Todavía no hay ninguna tele vinculada por código.</td></tr>`;
+    return;
+  }
+  // Ojo: aquí no se pinta NUNCA la contraseña de Xtream.
+  tbody.innerHTML = state.pairings
+    .map(
+      (p) => `
+        <tr>
+          <td class="code-cell">${escapeHtml(p.code)}</td>
+          <td dir="auto">${escapeHtml(p.label || "—")}</td>
+          <td>${escapeHtml(describePlaylist(p.playlist_type, p.playlist_url, p.xtream_server, p.xtream_username))}</td>
+          <td>${escapeHtml(formatDateTime(p.updated_at))}</td>
+          <td>
+            <button class="btn" data-pair-edit="${escapeHtml(p.code)}">Cambiar lista</button>
+            <button class="btn danger" data-pair-unlink="${escapeHtml(p.code)}">Desvincular</button>
+          </td>
+        </tr>`
+    )
+    .join("");
+}
+
+el("pairings-tbody").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+
+  if ("pairEdit" in btn.dataset) {
+    // Rellena el formulario de arriba con lo que tiene ahora esa tele, para
+    // cambiar solo lo necesario y volver a enviarlo con el mismo código.
+    const p = state.pairings.find((row) => row.code === btn.dataset.pairEdit);
+    if (!p) return;
+    el("pair-code").value = p.code;
+    el("pair-label").value = p.label || "";
+    fillPlaylistFields("pair", {
+      type: p.playlist_type,
+      url: p.playlist_url,
+      server: p.xtream_server,
+      username: p.xtream_username,
+      password: p.xtream_password,
+    });
+    setPairStatus(`Cambia lo que necesites y pulsa "Enviar lista a la tele" para actualizar la tele ${p.code}.`);
+    el("pair-form").scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+
+  if ("pairUnlink" in btn.dataset) {
+    const code = btn.dataset.pairUnlink;
+    if (!confirm(`¿Desvincular la tele con el código ${code}? Dejará de recibir esta lista.`)) return;
+    const { error } = await supabaseClient.from("bt_pairings").delete().eq("code", code);
+    if (error) alert("No se pudo desvincular: " + friendlyDbError(error));
+    loadPairings();
+  }
+});
+
+/* ------------------------------------------------------------ */
+/* Listas automáticas                                             */
+/* ------------------------------------------------------------ */
+/* Enlaces (M3U o Xtream) que el proceso de cada noche vuelve a importar
+   solo, añadiendo únicamente los canales nuevos. */
+
+async function loadAutoSources() {
+  const tbody = el("auto-tbody");
+  tbody.innerHTML = `<tr><td colspan="7" class="muted">Cargando listas automáticas…</td></tr>`;
+  const { data, error } = await supabaseClient
+    .from("bt_auto_sources")
+    .select("*")
+    .order("created_at", { ascending: true });
+  if (error) {
+    tbody.innerHTML = `<tr><td colspan="7" class="error-text">${escapeHtml(friendlyDbError(error))}</td></tr>`;
+    return;
+  }
+  state.autoSources = data || [];
+  renderAutoSources();
+}
+
+function renderAutoSources() {
+  const tbody = el("auto-tbody");
+  if (!state.autoSources.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">Todavía no hay ninguna lista automática. Pulsa "+ Añadir lista".</td></tr>`;
+    return;
+  }
+  // Tampoco aquí se pinta la contraseña de Xtream.
+  tbody.innerHTML = state.autoSources
+    .map((src) => {
+      const statusHtml = src.enabled
+        ? '<span class="status-ok">● Activa</span>'
+        : '<span class="muted">Desactivada</span>';
+      return `
+        <tr>
+          <td class="name-cell" dir="auto">${escapeHtml(src.name || "—")}</td>
+          <td>${escapeHtml(describePlaylist(src.kind, src.url, src.xtream_server, src.xtream_username))}</td>
+          <td class="cat-cell" dir="auto">${escapeHtml(src.category_override || "La de la lista")}</td>
+          <td>${statusHtml}</td>
+          <td title="${escapeHtml(formatDateTime(src.last_run_at))}">${src.last_run_at ? escapeHtml(formatLastCheck(src.last_run_at)) : "Nunca"}</td>
+          <td title="${escapeHtml(src.last_result || "")}">${escapeHtml(src.last_result || "—")}</td>
+          <td>
+            <button class="btn" data-auto-edit="${escapeHtml(src.id)}">✏️ Editar</button>
+            <button class="btn" data-auto-toggle="${escapeHtml(src.id)}">${src.enabled ? "Desactivar" : "Activar"}</button>
+            <button class="btn danger" data-auto-delete="${escapeHtml(src.id)}">Borrar</button>
+          </td>
+        </tr>`;
+    })
+    .join("");
+}
+
+function openAutoModal(src) {
+  state.editingAutoId = src ? src.id : null;
+  el("auto-modal-title").textContent = src ? "Editar lista automática" : "Añadir lista automática";
+  el("auto-form").reset();
+  el("auto-name").value = src ? src.name || "" : "";
+  el("auto-category").value = src ? src.category_override || "" : "";
+  el("auto-enabled").checked = src ? !!src.enabled : true;
+  fillPlaylistFields("auto", {
+    type: src ? src.kind : "m3u",
+    url: src && src.url,
+    server: src && src.xtream_server,
+    username: src && src.xtream_username,
+    password: src && src.xtream_password,
+  });
+  el("auto-form-error").classList.add("hidden");
+  el("auto-modal").classList.remove("hidden");
+}
+
+el("new-auto-btn").addEventListener("click", () => openAutoModal(null));
+
+el("auto-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const showError = (msg) => {
+    el("auto-form-error").textContent = msg;
+    el("auto-form-error").classList.remove("hidden");
+  };
+  const list = readPlaylistFields("auto");
+  if (list.error) {
+    showError(list.error);
+    return;
+  }
+  const payload = {
+    name: el("auto-name").value.trim() || null,
+    kind: list.type,
+    url: list.url,
+    xtream_server: list.server,
+    xtream_username: list.username,
+    xtream_password: list.password,
+    category_override: el("auto-category").value.trim() || null,
+    enabled: el("auto-enabled").checked,
+  };
+
+  let error;
+  if (state.editingAutoId != null) {
+    ({ error } = await supabaseClient.from("bt_auto_sources").update(payload).eq("id", state.editingAutoId));
+  } else {
+    ({ error } = await supabaseClient.from("bt_auto_sources").insert(payload));
+  }
+  if (error) {
+    showError("No se pudo guardar: " + friendlyDbError(error));
+    return;
+  }
+  state.editingAutoId = null;
+  el("auto-modal").classList.add("hidden");
+  loadAutoSources();
+});
+
+el("auto-tbody").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  const findSource = (id) => state.autoSources.find((src) => String(src.id) === String(id));
+
+  if ("autoEdit" in btn.dataset) {
+    const src = findSource(btn.dataset.autoEdit);
+    if (src) openAutoModal(src);
+    return;
+  }
+
+  if ("autoToggle" in btn.dataset) {
+    const src = findSource(btn.dataset.autoToggle);
+    if (!src) return;
+    btn.disabled = true;
+    const { error } = await supabaseClient
+      .from("bt_auto_sources")
+      .update({ enabled: !src.enabled })
+      .eq("id", src.id);
+    if (error) alert("No se pudo cambiar: " + friendlyDbError(error));
+    loadAutoSources();
+    return;
+  }
+
+  if ("autoDelete" in btn.dataset) {
+    const src = findSource(btn.dataset.autoDelete);
+    if (!src) return;
+    if (!confirm(`¿Borrar la lista automática "${src.name || "sin nombre"}"? Los canales que ya importó NO se borran.`)) return;
+    const { error } = await supabaseClient.from("bt_auto_sources").delete().eq("id", src.id);
+    if (error) alert("No se pudo borrar: " + friendlyDbError(error));
+    loadAutoSources();
+  }
+});
+
+/* ------------------------------------------------------------ */
+/* Centro de control (vigilancia automática)                      */
+/* ------------------------------------------------------------ */
+/* Un proceso revisa todos los canales cada hora. Cada pasada deja un
+   resumen en "bt_health_runs" y, en "bt_health_events", lo que ha hecho
+   con cada canal que ha cambiado. Aquí solo se leen esas dos tablas. */
+
+// Qué significa cada tipo de aviso, en palabras normales. Los de tipo
+// "hidden-reason" son los motivos por los que un canal se ha ocultado en la app.
+const HEALTH_EVENTS = {
+  error_http: { label: "Error del servidor (404/500)", kind: "hidden-reason" },
+  sin_respuesta: { label: "No contesta", kind: "hidden-reason" },
+  bucle: { label: "Redirección en bucle", kind: "hidden-reason" },
+  vacio: { label: "Sin vídeo", kind: "hidden-reason" },
+  congelado: { label: "Emisión congelada", kind: "hidden-reason" },
+  borrado: { label: "Borrado", kind: "deleted" },
+  recuperado: { label: "Recuperado", kind: "restored" },
+  duplicado: { label: "Duplicado borrado", kind: "deleted" },
+};
+
+const HIDDEN_EVENT_TYPES = Object.keys(HEALTH_EVENTS).filter((k) => HEALTH_EVENTS[k].kind === "hidden-reason");
+
+function setControlStatus(text, isError) {
+  el("control-status").textContent = text || "";
+  el("control-status").classList.toggle("error-text", !!isError);
+}
+
+async function loadControl() {
+  setControlStatus("Cargando…");
+  const ok = await loadHealthRuns();
+  if (ok) {
+    setControlStatus("");
+    await loadHealthEvents();
+  }
+}
+
+/* Resumen de la última pasada y gráfica de las 24 últimas. Devuelve false
+   si no se ha podido leer (por ejemplo, porque falta el archivo SQL). */
+async function loadHealthRuns() {
+  const { data, error } = await supabaseClient
+    .from("bt_health_runs")
+    .select("*")
+    .order("started_at", { ascending: false })
+    .limit(24);
+  if (error) {
+    setControlStatus(friendlyDbError(error), true);
+    renderHealthSummary(null);
+    el("health-chart").innerHTML = "";
+    el("health-events-tbody").innerHTML = "";
+    return false;
+  }
+  const runs = data || [];
+  renderHealthSummary(runs[0] || null);
+  renderHealthChart(runs.slice().reverse()); // de la más antigua a la más reciente
+  return true;
+}
+
+function renderHealthSummary(run) {
+  const show = (id, value) => {
+    el(id).textContent = value ?? "—";
+  };
+  const warning = el("health-warning");
+  warning.classList.add("hidden");
+
+  if (!run) {
+    show("health-when", "Todavía no ha habido ninguna");
+    el("health-when").title = "";
+    el("health-when-label").textContent = "Última vigilancia";
+    ["health-total", "health-ok", "health-hidden", "health-deleted", "health-restored"].forEach((id) => show(id, null));
+    return;
+  }
+
+  show("health-when", formatLastCheck(run.started_at));
+  el("health-when").title = formatDateTime(run.started_at);
+  el("health-when-label").textContent = run.finished_at
+    ? `Última vigilancia (tardó ${formatDuration(new Date(run.finished_at) - new Date(run.started_at))})`
+    : run.aborted
+      ? "Última vigilancia (no terminó)"
+      : "Última vigilancia (todavía en marcha)";
+  show("health-total", run.total);
+  show("health-ok", run.ok);
+  show("health-hidden", run.hidden);
+  show("health-deleted", run.deleted);
+  show("health-restored", run.restored);
+
+  // Si la pasada se paró a medias (por ejemplo, porque fallaban casi todos
+  // los canales a la vez y parecía un problema de internet del servidor, no
+  // de los canales), se avisa con la explicación que dejó el proceso.
+  if (run.aborted) {
+    warning.textContent =
+      "⚠ La última vigilancia se paró antes de terminar" + (run.note ? `: ${run.note}` : ".");
+    warning.classList.remove("hidden");
+  }
+}
+
+/* Gráfica sencilla hecha solo con CSS: una columna por pasada, con la parte
+   verde (funcionan) abajo y la roja (caídos) encima. Todas las columnas
+   usan la misma escala, la de la pasada con más canales. */
+function renderHealthChart(runs) {
+  const chart = el("health-chart");
+  if (!runs.length) {
+    chart.innerHTML = `<p class="fine-print">Todavía no hay pasadas que enseñar.</p>`;
+    return;
+  }
+  const max = Math.max(1, ...runs.map((r) => (Number(r.ok) || 0) + (Number(r.broken) || 0)));
+  chart.innerHTML = runs
+    .map((r) => {
+      const ok = Number(r.ok) || 0;
+      const broken = Number(r.broken) || 0;
+      const tip = `${formatDateTime(r.started_at)} · ${ok} funcionan · ${broken} caídos${r.aborted ? " · no terminó" : ""}`;
+      return `
+        <div class="health-bar${r.aborted ? " aborted" : ""}" title="${escapeHtml(tip)}">
+          <span class="bar-broken" style="height:${((broken / max) * 100).toFixed(1)}%"></span>
+          <span class="bar-ok" style="height:${((ok / max) * 100).toFixed(1)}%"></span>
+        </div>`;
+    })
+    .join("");
+}
+
+/* Los 200 avisos más recientes, del tipo elegido en el filtro. El filtro
+   se aplica en Supabase, así que "200" son los 200 últimos de ESE tipo. */
+async function loadHealthEvents() {
+  const tbody = el("health-events-tbody");
+  tbody.innerHTML = `<tr><td colspan="5" class="muted">Cargando avisos…</td></tr>`;
+  const filter = el("health-filter").value;
+  let query = supabaseClient
+    .from("bt_health_events")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(200);
+  if (filter === "__hidden") query = query.in("event", HIDDEN_EVENT_TYPES);
+  else if (filter) query = query.eq("event", filter);
+
+  const { data, error } = await query;
+  if (error) {
+    tbody.innerHTML = `<tr><td colspan="5" class="error-text">${escapeHtml(friendlyDbError(error))}</td></tr>`;
+    return;
+  }
+  if (!data || !data.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">No hay avisos${filter ? " de este tipo" : ""}.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = data
+    .map((ev) => {
+      const info = HEALTH_EVENTS[ev.event] || { label: ev.event || "—", kind: "other" };
+      const hint = info.kind === "hidden-reason" ? "Ocultado en la app por este motivo" : "";
+      return `
+        <tr>
+          <td>${escapeHtml(formatDateTime(ev.created_at))}</td>
+          <td class="name-cell" dir="auto">${escapeHtml(ev.channel_name || "—")}</td>
+          <td class="cat-cell" dir="auto">${escapeHtml(ev.category || "—")}</td>
+          <td><span class="event-tag ${escapeHtml(info.kind)}" title="${escapeHtml(hint)}">${escapeHtml(info.label)}</span></td>
+          <td title="${escapeHtml(ev.detail || "")}">${escapeHtml(ev.detail || "—")}</td>
+        </tr>`;
+    })
+    .join("");
+}
+
+el("health-filter").addEventListener("change", loadHealthEvents);
+el("control-refresh-btn").addEventListener("click", loadControl);
 
 init();
