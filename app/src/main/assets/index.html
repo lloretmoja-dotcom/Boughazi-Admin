@@ -44,6 +44,8 @@
     <button class="tab" data-tab="channels">Canales</button>
     <button class="tab" data-tab="codes">Códigos</button>
     <button class="tab" data-tab="users">Usuarios</button>
+    <button class="tab" data-tab="pairing">Vincular por código</button>
+    <button class="tab" data-tab="auto">Listas automáticas</button>
   </nav>
 
   <!-- ---- Estadísticas ---- -->
@@ -134,6 +136,72 @@
       </table>
     </div>
   </section>
+
+  <!-- ---- Vincular por código ---- -->
+  <section id="tab-pairing" class="tab-panel hidden">
+    <div class="panel-head">
+      <h2>Vincular una tele por código</h2>
+    </div>
+    <p class="fine-print">En la tele, entra en "Vincular por código": aparece un código de 8 letras y números. Escríbelo aquí junto con la lista que quieres que vea esa tele y pulsa "Enviar". La tele la recibe sola en unos segundos, sin tener que escribir enlaces largos con el mando. Si nadie lo usa, el código caduca a los 30 minutos.</p>
+
+    <form id="pair-form" class="form-card" autocomplete="off" novalidate>
+      <label for="pair-code">Código que sale en la tele</label>
+      <input id="pair-code" type="text" class="code-input" required maxlength="20" autocapitalize="characters" spellcheck="false" placeholder="Ej: ABCD2345" />
+
+      <label for="pair-label">Etiqueta (opcional, para recordar de quién es)</label>
+      <input id="pair-label" type="text" placeholder="Ej: Salón de la familia García" />
+
+      <label for="pair-type">Tipo de lista</label>
+      <select id="pair-type">
+        <option value="m3u">Enlace de lista (M3U)</option>
+        <option value="xtream">Xtream Codes (servidor, usuario y contraseña)</option>
+      </select>
+
+      <div id="pair-m3u-fields">
+        <label for="pair-url">Enlace de la lista (M3U)</label>
+        <input id="pair-url" type="url" placeholder="https://.../lista.m3u" />
+      </div>
+
+      <div id="pair-xtream-fields" class="hidden">
+        <label for="pair-xtream-server">Servidor Xtream</label>
+        <input id="pair-xtream-server" type="url" placeholder="http://servidor.com:8080" />
+        <label for="pair-xtream-user">Usuario</label>
+        <input id="pair-xtream-user" type="text" autocapitalize="none" spellcheck="false" />
+        <label for="pair-xtream-pass">Contraseña</label>
+        <input id="pair-xtream-pass" type="password" autocomplete="new-password" />
+      </div>
+
+      <button id="pair-submit" type="submit" class="btn btn-primary btn-block">Enviar lista a la tele</button>
+    </form>
+    <p id="pair-status" class="fine-print"></p>
+
+    <h3 class="section-title">Teles vinculadas</h3>
+    <div class="table-wrap">
+      <table class="admin-table">
+        <thead>
+          <tr><th>Código</th><th>Etiqueta</th><th>Lista</th><th>Último cambio</th><th></th></tr>
+        </thead>
+        <tbody id="pairings-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ---- Listas automáticas ---- -->
+  <section id="tab-auto" class="tab-panel hidden">
+    <div class="panel-head">
+      <h2>Listas automáticas</h2>
+      <button id="new-auto-btn" class="btn btn-primary">+ Añadir lista</button>
+    </div>
+    <p class="fine-print">Cada noche, un proceso automático vuelve a descargar estas listas y añade solo los canales nuevos: los que ya tienes no se tocan ni se duplican, y no se borra nada. Las listas desactivadas se saltan. En "Resultado" se ve qué pasó la última vez.</p>
+    <div class="table-wrap">
+      <table class="admin-table">
+        <thead>
+          <tr><th>Nombre</th><th>Lista</th><th>Categoría</th><th>Estado</th><th>Última vez</th><th>Resultado</th><th></th></tr>
+        </thead>
+        <tbody id="auto-tbody"></tbody>
+      </table>
+    </div>
+  </section>
 </div>
 
 <!-- ======================= MODAL: Canal ======================= -->
@@ -177,6 +245,18 @@
     <input id="import-url-input" type="url" placeholder="https://.../lista.m3u" />
     <button id="import-url-btn" class="btn" type="button">Descargar lista</button>
 
+    <div class="import-option">
+      <label class="import-option-title">…o entra con Xtream Codes</label>
+      <p class="fine-print">Si tu proveedor te ha dado una dirección de servidor, un usuario y una contraseña (en vez de un enlace), escríbelos aquí y se traen sus canales en directo.</p>
+      <label for="import-xtream-server">Servidor</label>
+      <input id="import-xtream-server" type="url" placeholder="http://servidor.com:8080" />
+      <label for="import-xtream-user">Usuario</label>
+      <input id="import-xtream-user" type="text" autocapitalize="none" spellcheck="false" />
+      <label for="import-xtream-pass">Contraseña</label>
+      <input id="import-xtream-pass" type="password" autocomplete="new-password" />
+      <button id="import-xtream-btn" class="btn" type="button">Cargar canales de Xtream</button>
+    </div>
+
     <label>Categoría para todos estos canales (opcional)</label>
     <input id="import-category-override" type="text" placeholder="Ej: España, Egipto, Deportes…" />
     <p class="fine-print">Si la rellenas, todos los canales de este archivo entrarán con esa misma categoría (por ejemplo, el nombre del país), así se quedan agrupados juntos en la app aunque luego importes otros países. Si la dejas en blanco, se usa la categoría que ya traiga el propio archivo.</p>
@@ -194,6 +274,47 @@
 
     <button id="import-confirm-btn" class="btn btn-primary btn-block hidden">Importar canales</button>
     <p id="import-error" class="fine-print error-text hidden"></p>
+  </div>
+</div>
+
+<!-- ======================= MODAL: Lista automática ======================= -->
+<div id="auto-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <button class="modal-close" data-close="auto-modal" aria-label="Cerrar">✕</button>
+    <h3 id="auto-modal-title">Añadir lista automática</h3>
+    <form id="auto-form" autocomplete="off" novalidate>
+      <label for="auto-name">Nombre (para reconocerla)</label>
+      <input id="auto-name" type="text" placeholder="Ej: Canales de Marruecos" />
+
+      <label for="auto-type">Tipo de lista</label>
+      <select id="auto-type">
+        <option value="m3u">Enlace de lista (M3U)</option>
+        <option value="xtream">Xtream Codes (servidor, usuario y contraseña)</option>
+      </select>
+
+      <div id="auto-m3u-fields">
+        <label for="auto-url">Enlace de la lista (M3U)</label>
+        <input id="auto-url" type="url" placeholder="https://.../lista.m3u" />
+      </div>
+
+      <div id="auto-xtream-fields" class="hidden">
+        <label for="auto-xtream-server">Servidor Xtream</label>
+        <input id="auto-xtream-server" type="url" placeholder="http://servidor.com:8080" />
+        <label for="auto-xtream-user">Usuario</label>
+        <input id="auto-xtream-user" type="text" autocapitalize="none" spellcheck="false" />
+        <label for="auto-xtream-pass">Contraseña</label>
+        <input id="auto-xtream-pass" type="password" autocomplete="new-password" />
+      </div>
+
+      <label for="auto-category">Categoría para todos sus canales (opcional)</label>
+      <input id="auto-category" type="text" placeholder="Ej: Marruecos, Deportes…" />
+      <p class="fine-print">Si la dejas en blanco, cada canal entra con la categoría que traiga la propia lista.</p>
+
+      <label class="check-row"><input id="auto-enabled" type="checkbox" checked /> Activa (se importa cada noche)</label>
+
+      <button type="submit" class="btn btn-primary btn-block">Guardar lista</button>
+    </form>
+    <p id="auto-form-error" class="fine-print error-text hidden"></p>
   </div>
 </div>
 

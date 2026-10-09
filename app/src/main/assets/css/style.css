@@ -22,6 +22,7 @@ body {
 .muted { color: var(--muted); }
 .fine-print { color: var(--muted); font-size: 13px; }
 .error-text { color: var(--danger); }
+.success-text { color: #35d07f; }
 
 .btn {
   border: 1px solid var(--border);
@@ -68,7 +69,7 @@ h1 span { color: var(--orange); }
 .tagline { color: var(--muted); margin: 2px 0 20px; font-size: 14px; }
 
 label { display: block; text-align: left; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
-input {
+input, select {
   width: 100%;
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -77,7 +78,10 @@ input {
   border-radius: 8px;
   font-size: 15px;
 }
-input:focus { outline: 2px solid var(--blue); }
+input:focus, select:focus { outline: 2px solid var(--blue); }
+/* Casilla de marcar con su texto al lado (por ejemplo "Activa") */
+.check-row { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 14px; }
+.check-row input[type="checkbox"] { width: auto; margin: 0; }
 
 /* ---- dashboard ---- */
 .topbar {
@@ -206,6 +210,29 @@ input:focus { outline: 2px solid var(--blue); }
 }
 
 .import-preview { max-height: 260px; overflow-y: auto; margin-top: 10px; }
+
+/* Bloque "…o entra con Xtream Codes" dentro de Importar lista */
+.import-option {
+  margin-top: 16px; padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.import-option-title { color: var(--text); font-weight: 600; font-size: 14px; }
+.import-option .btn { margin-top: 10px; }
+
+/* Fila del final con el botón "Mostrar más" (canales y vista previa) */
+.admin-table tr.load-more-row td { text-align: center; max-width: none; padding: 12px 8px; }
+
+/* Formulario de "Vincular por código" */
+.form-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 16px 16px;
+  max-width: 520px;
+}
+.code-input { font-size: 20px; font-weight: 700; letter-spacing: 3px; text-transform: uppercase; }
+.admin-table td.code-cell { font-weight: 700; letter-spacing: 1px; }
+.section-title { font-size: 16px; margin: 24px 0 10px; }
 
 .code-value {
   font-size: 24px; font-weight: 800; letter-spacing: 2px;
