@@ -342,11 +342,11 @@ async function refreshRobot() {
   if (gh && gh.missing) {
     setRobotState("😴 Sin instalar: falta fusionar el robot en GitHub", "");
   } else if (run && (run.status === "in_progress" || run.status === "queued" || run.status === "waiting")) {
-    setRobotState("🟢 Robot activo · buscando y probando canales", "on");
+    setRobotState("🟢 Robot trabajando · buscando y probando canales", "on");
   } else if (run && run.conclusion && run.conclusion !== "success") {
     setRobotState("⚠️ La última pasada terminó con error", "err");
   } else if (run && Date.now() - new Date(run.updated_at).getTime() < 26 * 3600 * 1000) {
-    setRobotState(lastRow && lastRow.status === "ADVERTENCIA" ? "✅ Sincronizado (con avisos)" : "✅ Sincronizado con Supabase", lastRow && lastRow.status === "ADVERTENCIA" ? "warn" : "ok");
+    setRobotState(lastRow && lastRow.status === "ADVERTENCIA" ? "✅ Sincronizado (con avisos)" : "✅ Sincronizado", lastRow && lastRow.status === "ADVERTENCIA" ? "warn" : "ok");
   } else if (run || lastRow) {
     setRobotState("😴 En reposo", "");
   } else {
@@ -415,7 +415,7 @@ el("robot-run-btn").addEventListener("click", async () => {
     if (res.status === 204) {
       el("robot-status").textContent =
         "Hecho: el robot ha arrancado. Tarda entre 10 y 40 minutos; al terminar te llega el informe por correo.";
-      setRobotState("🟢 Robot activo · arrancando", "on");
+      setRobotState("🟢 Robot trabajando · arrancando", "on");
       setTimeout(refreshRobot, 15000);
     } else if (res.status === 401 || res.status === 403) {
       el("robot-status").textContent =
