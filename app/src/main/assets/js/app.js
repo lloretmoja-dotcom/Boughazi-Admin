@@ -25,6 +25,7 @@ const state = {
   pairings: [],
   autoSources: [],
   editingAutoId: null,
+  countries: null,
 };
 
 /* ------------------------------------------------------------ */
@@ -56,9 +57,50 @@ function normalizeText(str) {
     .trim();
 }
 
+/* Bandera a partir del código del país ("MA" → 🇲🇦): son dos letras
+   especiales que el móvil dibuja juntas como una bandera. */
+function flagFromCode(code) {
+  const cc = String(code || "").toUpperCase();
+  if (!/^[A-Z]{2}$/.test(cc)) return "📺";
+  return String.fromCodePoint(...[...cc].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65));
+}
+
+/* Nombre del país en español a partir de su código ("MA" → "Marruecos"),
+   usando los nombres que ya trae el propio móvil. Si el móvil no los
+   tiene, devuelve null y se usa el nombre en inglés. */
+let regionNamesEs = null;
+try {
+  regionNamesEs = new Intl.DisplayNames(["es"], { type: "region" });
+} catch (_err) {
+  regionNamesEs = null;
+}
+function spanishCountryName(code) {
+  if (!regionNamesEs) return null;
+  try {
+    const name = regionNamesEs.of(String(code).toUpperCase());
+    return name && name.toUpperCase() !== String(code).toUpperCase() ? name : null;
+  } catch (_err) {
+    return null;
+  }
+}
+
+/* Además de la lista de arriba, cualquier país del mundo escrito en
+   español ("Japón", "Brasil"…) recibe su bandera. Se calcula una vez. */
+const FLAGS_ALL = (() => {
+  const map = {};
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  for (const a of letters) {
+    for (const b of letters) {
+      const name = spanishCountryName(a + b);
+      if (name) map[normalizeText(name)] = flagFromCode(a + b);
+    }
+  }
+  return map;
+})();
+
 function flagFor(category) {
   const key = normalizeText(category);
-  return FLAGS[key] || "📺";
+  return FLAGS[key] || FLAGS_ALL[key] || "📺";
 }
 
 /* ------------------------------------------------------------ */
@@ -1117,6 +1159,125 @@ el("import-xtream-btn").addEventListener("click", async () => {
     hideImportPreview();
   } finally {
     btn.disabled = false;
+  }
+});
+
+/* ---- Canales por país ----
+   Se busca un país, se toca, y el panel descarga el catálogo completo
+   de canales de ese país de la lista pública iptv-org (organizada por
+   países). Luego se abre la ventana de importar con todos marcados y
+   la categoría ya puesta con el nombre del país, así entran agrupados
+   y con su bandera. Se sube con el mismo botón "Importar" de siempre,
+   que no repite los canales que ya tienes. */
+
+const IPTV_ORG_COUNTRIES = "https://iptv-org.github.io/api/countries.json";
+const iptvOrgCountryList = (code) => `https://iptv-org.github.io/iptv/countries/${code.toLowerCase()}.m3u`;
+
+/* Lista de países: primero se intenta la de iptv-org (solo países que
+   tienen lista); si no se puede descargar, se usan todos los países
+   que conoce el móvil. */
+async function loadCountryList() {
+  if (state.countries) return state.countries;
+  let raw = [];
+  try {
+    const data = JSON.parse(await downloadListText(IPTV_ORG_COUNTRIES));
+    if (Array.isArray(data)) raw = data.map((c) => ({ code: c.code, englishName: c.name }));
+  } catch (_err) {
+    raw = [];
+  }
+  if (!raw.length) {
+    const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for (const a of letters) for (const b of letters) if (spanishCountryName(a + b)) raw.push({ code: a + b, englishName: "" });
+  }
+  state.countries = raw
+    .filter((c) => /^[A-Za-z]{2}$/.test(String(c.code || "")))
+    .map((c) => {
+      const code = c.code.toUpperCase();
+      const name = spanishCountryName(code) || c.englishName || code;
+      return { code, name, englishName: c.englishName || "", flag: flagFromCode(code) };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name, "es"));
+  return state.countries;
+}
+
+function renderCountryGrid() {
+  const needle = normalizeText(el("country-search").value);
+  const haveByCountry = new Map();
+  for (const ch of state.channels) {
+    const key = normalizeText(ch.category);
+    haveByCountry.set(key, (haveByCountry.get(key) || 0) + 1);
+  }
+  const list = (state.countries || []).filter(
+    (c) =>
+      !needle ||
+      normalizeText(c.name).includes(needle) ||
+      normalizeText(c.englishName).includes(needle) ||
+      normalizeText(c.code) === needle
+  );
+  el("country-grid").innerHTML = list.length
+    ? list
+        .map((c) => {
+          const have = haveByCountry.get(normalizeText(c.name)) || 0;
+          return `<button type="button" class="country-btn" data-country="${escapeHtml(c.code)}">
+            <span class="country-flag">${c.flag}</span>
+            <span dir="auto">${escapeHtml(c.name)}</span>
+            ${have ? `<span class="country-have">${have} ya</span>` : ""}
+          </button>`;
+        })
+        .join("")
+    : `<p class="muted">No hay ningún país con ese nombre.</p>`;
+}
+
+el("country-channels-btn").addEventListener("click", async () => {
+  el("country-search").value = "";
+  el("country-status").textContent = "Cargando países…";
+  el("country-grid").innerHTML = "";
+  el("country-modal").classList.remove("hidden");
+  await loadCountryList();
+  el("country-status").textContent = `${state.countries.length} países. Toca uno para ver todos sus canales.`;
+  renderCountryGrid();
+  el("country-search").focus();
+});
+
+el("country-search").addEventListener("input", debounce(renderCountryGrid, 150));
+
+el("country-grid").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-country]");
+  if (!btn) return;
+  const country = (state.countries || []).find((c) => c.code === btn.dataset.country);
+  if (!country) return;
+
+  const buttons = el("country-grid").querySelectorAll("button");
+  buttons.forEach((b) => (b.disabled = true));
+  el("country-status").textContent = `Descargando los canales de ${country.flag} ${country.name}…`;
+  let items;
+  try {
+    items = parseChannelList(await downloadListText(iptvOrgCountryList(country.code)));
+  } catch (err) {
+    el("country-status").textContent = `No se pudieron descargar los canales de ${country.name}: ${err.message}`;
+    buttons.forEach((b) => (b.disabled = false));
+    return;
+  }
+  buttons.forEach((b) => (b.disabled = false));
+  if (!items.length) {
+    el("country-status").textContent = `La lista no tiene canales de ${country.flag} ${country.name} ahora mismo.`;
+    return;
+  }
+
+  // Se abre la ventana de importar ya preparada con todo el catálogo.
+  el("import-file-input").value = "";
+  el("import-url-input").value = "";
+  el("import-xtream-server").value = "";
+  el("import-xtream-user").value = "";
+  el("import-xtream-pass").value = "";
+  el("import-category-override").value = country.name;
+  el("import-error").classList.add("hidden");
+  state.importItems = [];
+  el("country-modal").classList.add("hidden");
+  el("import-modal").classList.remove("hidden");
+  showImportItems(items);
+  if (state.importItems.length) {
+    el("import-status").textContent = `${country.flag} ${country.name}: ` + el("import-status").textContent;
   }
 });
 
