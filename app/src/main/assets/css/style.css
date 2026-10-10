@@ -316,3 +316,27 @@ input:focus, select:focus { outline: 2px solid var(--blue); }
   .stat-cards { flex-direction: row; flex-wrap: wrap; }
   .stat-card { flex: 1 1 180px; }
 }
+
+/* ---- canales por país ---- */
+.country-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  max-height: 60vh;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+.country-btn {
+  display: flex; align-items: center; gap: 8px;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.country-btn:disabled { opacity: 0.5; }
+.country-btn .country-flag { font-size: 22px; }
+.country-btn .country-have { margin-left: auto; color: var(--muted); font-size: 12px; }

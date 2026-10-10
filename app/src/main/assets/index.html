@@ -145,6 +145,7 @@
       <ul class="fine-print">
         <li><b>+ Añadir canal</b>: uno a uno, pegando su enlace.</li>
         <li><b>📂 Importar lista</b>: muchos de golpe desde un archivo M3U, el enlace de una lista o una cuenta Xtream Codes.</li>
+        <li><b>🌍 Canales por país</b>: buscas un país, lo tocas y se preparan todos sus canales para subirlos de golpe.</li>
         <li><b>Listas automáticas</b> (más abajo): enlaces que se vuelven a importar solos cada noche.</li>
       </ul>
     </div>
@@ -153,6 +154,7 @@
       <h2>Canales</h2>
       <div class="panel-head-actions">
         <button id="check-channels-btn" class="btn">Verificar caídos</button>
+        <button id="country-channels-btn" class="btn">🌍 Canales por país</button>
         <button id="import-channels-btn" class="btn">📂 Importar lista</button>
         <button id="new-channel-btn" class="btn btn-primary">+ Añadir canal</button>
       </div>
@@ -373,6 +375,18 @@
 
     <button id="import-confirm-btn" class="btn btn-primary btn-block hidden">Importar canales</button>
     <p id="import-error" class="fine-print error-text hidden"></p>
+  </div>
+</div>
+
+<!-- ======================= MODAL: Canales por país ======================= -->
+<div id="country-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <button class="modal-close" data-close="country-modal" aria-label="Cerrar">✕</button>
+    <h3>🌍 Canales por país</h3>
+    <p class="fine-print">Busca un país y tócalo: se descarga su catálogo completo de canales de la lista pública iptv-org y se prepara para subirlo a la app con su país y su bandera. Los que ya tienes no se repiten.</p>
+    <input id="country-search" type="search" class="search-input" placeholder="🔎 Buscar país…" />
+    <p id="country-status" class="fine-print"></p>
+    <div id="country-grid" class="country-grid"></div>
   </div>
 </div>
 
