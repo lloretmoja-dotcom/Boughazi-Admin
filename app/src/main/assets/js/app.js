@@ -98,6 +98,23 @@ const FLAGS_ALL = (() => {
   return map;
 })();
 
+/* Código ISO del país (MA, ES…) a partir de su nombre en español. */
+const ISO_ALL = (() => {
+  const map = {};
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  for (const a of letters) {
+    for (const b of letters) {
+      const name = spanishCountryName(a + b);
+      if (name) map[normalizeText(name)] = a + b;
+    }
+  }
+  return map;
+})();
+
+function isoFor(category) {
+  return ISO_ALL[normalizeText(category)] || "";
+}
+
 function flagFor(category) {
   const key = normalizeText(category);
   return FLAGS[key] || FLAGS_ALL[key] || "📺";
@@ -135,7 +152,7 @@ async function tryEnterDashboard() {
   el("dashboard").classList.remove("hidden");
   // Los canales, las listas automáticas (están en la misma sección, que es
   // la que se abre al entrar) y las estadísticas se piden a la vez.
-  await Promise.all([loadChannels(), loadAutoSources(), refreshStats()]);
+  await Promise.all([loadChannels(), loadAutoSources(), refreshStats(), refreshRobot()]);
   startStatsTimer();
 }
 
@@ -238,6 +255,182 @@ document.querySelectorAll(".subtab").forEach((btn) => {
     el("sub-" + btn.dataset.subtab).classList.remove("hidden");
     loadSubtab(btn.dataset.subtab);
   });
+});
+
+
+/* ------------------------------------------------------------ */
+/* Robot de canales                                               */
+/* ------------------------------------------------------------ */
+/* El robot (scripts/massive_indexer.js del repositorio de la tele) se
+   ejecuta cada día en GitHub Actions. Aquí se ve:
+   - si está trabajando ahora o cuándo terminó (lo dice GitHub),
+   - las cifras de su última pasada (las guarda en bt_robot_runs),
+   - cuántos canales activos y caídos hay ahora mismo en Supabase.
+   El botón "Lanzar" le pide a GitHub que lo ejecute ya. Para eso hace
+   falta una clave de GitHub, que se guarda solo en este móvil. */
+
+const ROBOT_REPO = "lloretmoja-dotcom/Boughazi-SmartTV";
+const ROBOT_WORKFLOW = "daily_indexer.yml";
+const ROBOT_TOKEN_KEY = "bt_github_token";
+let robotPollTimer = null;
+
+function robotToken() {
+  try {
+    return localStorage.getItem(ROBOT_TOKEN_KEY) || "";
+  } catch (_err) {
+    return "";
+  }
+}
+
+function githubHeaders() {
+  const headers = { Accept: "application/vnd.github+json" };
+  const token = robotToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+function timeAgo(iso) {
+  if (!iso) return "";
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return "hace un momento";
+  if (mins < 60) return `hace ${mins} min`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `hace ${hours} h`;
+  return `hace ${Math.round(hours / 24)} días`;
+}
+
+function setRobotState(text, dot) {
+  el("robot-state").textContent = text;
+  el("robot-dot").className = `robot-dot ${dot || ""}`;
+}
+
+async function fetchLatestRobotRun() {
+  const res = await fetch(
+    `https://api.github.com/repos/${ROBOT_REPO}/actions/workflows/${ROBOT_WORKFLOW}/runs?per_page=1`,
+    { headers: githubHeaders() }
+  );
+  if (res.status === 404) return { missing: true };
+  if (!res.ok) throw new Error(`GitHub ha contestado ${res.status}`);
+  const data = await res.json();
+  return { run: (data.workflow_runs || [])[0] || null };
+}
+
+async function refreshRobot() {
+  const [ghRes, lastRes, activeRes, brokenRes] = await Promise.allSettled([
+    fetchLatestRobotRun(),
+    supabaseClient.from("bt_robot_runs").select("*").order("finished_at", { ascending: false }).limit(1),
+    supabaseClient.from("bt_channels").select("id", { count: "exact", head: true }).not("is_broken", "is", true),
+    supabaseClient.from("bt_channels").select("id", { count: "exact", head: true }).eq("is_broken", true),
+  ]);
+
+  const count = (r) => (r.status === "fulfilled" && !r.value.error ? r.value.count : null);
+  const active = count(activeRes);
+  const broken = count(brokenRes);
+  el("robot-active").textContent = active == null ? "—" : active.toLocaleString("es");
+  el("robot-broken").textContent = broken == null ? "—" : broken.toLocaleString("es");
+
+  // Cifras de la última pasada (si la tabla bt_robot_runs ya existe).
+  const lastRow =
+    lastRes.status === "fulfilled" && !lastRes.value.error && lastRes.value.data ? lastRes.value.data[0] : null;
+  el("robot-added").textContent = lastRow ? `+${Number(lastRow.added || 0).toLocaleString("es")}` : "—";
+  el("robot-repaired").textContent = lastRow && lastRow.repaired ? `${lastRow.repaired} arreglados` : "";
+
+  // Estado: lo que diga GitHub manda; si no se puede preguntar, lo que
+  // guardó el robot en Supabase.
+  const gh = ghRes.status === "fulfilled" ? ghRes.value : null;
+  const run = gh && gh.run;
+  if (gh && gh.missing) {
+    setRobotState("😴 Sin instalar: falta fusionar el robot en GitHub", "");
+  } else if (run && (run.status === "in_progress" || run.status === "queued" || run.status === "waiting")) {
+    setRobotState("🟢 Robot trabajando · buscando y probando canales", "on");
+  } else if (run && run.conclusion && run.conclusion !== "success") {
+    setRobotState("⚠️ La última pasada terminó con error", "err");
+  } else if (run && Date.now() - new Date(run.updated_at).getTime() < 26 * 3600 * 1000) {
+    setRobotState(lastRow && lastRow.status === "ADVERTENCIA" ? "✅ Sincronizado (con avisos)" : "✅ Sincronizado", lastRow && lastRow.status === "ADVERTENCIA" ? "warn" : "ok");
+  } else if (run || lastRow) {
+    setRobotState("😴 En reposo", "");
+  } else {
+    setRobotState(ghRes.status === "rejected" ? "No se pudo preguntar a GitHub" : "😴 En reposo · aún no ha hecho ninguna pasada", "");
+  }
+
+  const lastIso = (run && run.status === "completed" && run.updated_at) || (lastRow && lastRow.finished_at) || null;
+  el("robot-last").textContent = lastIso ? formatDateTime(lastIso) : "—";
+  el("robot-last-detail").textContent = lastIso ? timeAgo(lastIso) : "";
+
+  el("robot-token-btn").textContent = robotToken() ? "🔑 GitHub conectado" : "🔑 Conectar con GitHub";
+
+  // Mientras trabaja, se vuelve a mirar cada 30 segundos.
+  clearTimeout(robotPollTimer);
+  if (el("robot-dot").classList.contains("on")) robotPollTimer = setTimeout(refreshRobot, 30000);
+}
+
+el("robot-token-btn").addEventListener("click", () => {
+  el("robot-token-box").classList.toggle("hidden");
+  el("robot-token-input").value = "";
+});
+
+el("robot-token-save").addEventListener("click", () => {
+  const token = el("robot-token-input").value.trim();
+  if (!token) return;
+  try {
+    localStorage.setItem(ROBOT_TOKEN_KEY, token);
+  } catch (_err) {
+    el("robot-status").textContent = "No se pudo guardar la clave en este móvil.";
+    return;
+  }
+  el("robot-token-box").classList.add("hidden");
+  el("robot-status").textContent = "Clave guardada. Ya puedes lanzar el robot desde aquí.";
+  refreshRobot();
+});
+
+el("robot-token-forget").addEventListener("click", () => {
+  try {
+    localStorage.removeItem(ROBOT_TOKEN_KEY);
+  } catch (_err) {
+    /* nada que borrar */
+  }
+  el("robot-token-box").classList.add("hidden");
+  el("robot-status").textContent = "Clave borrada de este móvil.";
+  refreshRobot();
+});
+
+el("robot-run-btn").addEventListener("click", async () => {
+  if (!robotToken()) {
+    el("robot-token-box").classList.remove("hidden");
+    el("robot-status").textContent = "Para lanzarlo desde aquí, primero guarda tu clave de GitHub.";
+    return;
+  }
+  const btn = el("robot-run-btn");
+  btn.disabled = true;
+  el("robot-status").textContent = "Pidiendo a GitHub que lance el robot…";
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${ROBOT_REPO}/actions/workflows/${ROBOT_WORKFLOW}/dispatches`,
+      {
+        method: "POST",
+        headers: { ...githubHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ ref: "main" }),
+      }
+    );
+    if (res.status === 204) {
+      el("robot-status").textContent =
+        "Hecho: el robot ha arrancado. Tarda entre 10 y 40 minutos; al terminar te llega el informe por correo.";
+      setRobotState("🟢 Robot trabajando · arrancando", "on");
+      setTimeout(refreshRobot, 15000);
+    } else if (res.status === 401 || res.status === 403) {
+      el("robot-status").textContent =
+        "GitHub no acepta la clave (caducada o sin el permiso \"Actions: Read and write\"). Vuelve a guardarla.";
+    } else if (res.status === 404) {
+      el("robot-status").textContent =
+        "GitHub no encuentra el robot: falta fusionar su PR, o la clave no tiene acceso a Boughazi-SmartTV.";
+    } else {
+      el("robot-status").textContent = `GitHub ha contestado ${res.status}: ${(await res.text()).slice(0, 200)}`;
+    }
+  } catch (err) {
+    el("robot-status").textContent = `No se pudo conectar con GitHub: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 /* ------------------------------------------------------------ */
@@ -449,6 +642,7 @@ function renderChannels() {
           <div class="group-header-inner">
             <span class="group-flag">${flagFor(group.category)}</span>
             <span class="group-name" dir="auto">${escapeHtml(group.category)}</span>
+            ${isoFor(group.category) ? `<span class="group-iso">${isoFor(group.category)}</span>` : ""}
             <span class="group-count">(${group.items.length} canal${group.items.length === 1 ? "" : "es"})</span>
             <button class="btn danger" data-delete-country="${escapeHtml(group.category)}">🗑 Borrar país entero</button>
           </div>

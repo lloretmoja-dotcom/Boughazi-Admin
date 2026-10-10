@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Boughazi-TV — Panel de administración</title>
+<title>Admin — Boughazi-TV</title>
 <meta name="robots" content="noindex, nofollow" />
 <link rel="stylesheet" href="css/style.css" />
 </head>
@@ -12,9 +12,9 @@
 <!-- ======================= LOGIN ======================= -->
 <main id="login-screen" class="screen login-screen">
   <div class="login-card">
-    <img class="brand-mark" src="img/logo.png" alt="Boughazi-TV" />
-    <h1>Boughazi<span>-TV</span></h1>
-    <p class="tagline">Panel de administración</p>
+    <img class="brand-mark robot-mark" src="img/robot.svg" alt="Robot" />
+    <h1>Ad<span>min</span></h1>
+    <p class="tagline">Boughazi-TV · centro de control</p>
 
     <form id="login-form" autocomplete="off">
       <label for="login-email">Correo</label>
@@ -34,8 +34,8 @@
 <div id="dashboard" class="app hidden">
 
   <header class="topbar">
-    <img class="brand-mark tiny" src="img/logo.png" alt="Boughazi-TV" />
-    <span class="brand-word">Boughazi<span>-TV</span> <span class="muted">/ admin</span></span>
+    <img class="brand-mark tiny robot-mark" src="img/robot.svg" alt="Robot" />
+    <span class="brand-word">Ad<span>min</span> <span class="muted">/ Boughazi-TV</span></span>
     <button id="logout-btn" class="btn btn-ghost">Cerrar sesión</button>
   </header>
 
@@ -140,6 +140,43 @@
 
   <!-- ==== 2. Canales y métodos de subida ==== -->
   <section id="tab-channels" class="tab-panel">
+    <!-- ---- Robot de canales (se ejecuta solo cada día en GitHub) ---- -->
+    <div class="robot-card">
+      <div class="robot-head">
+        <div class="robot-avatar-wrap">
+          <img class="robot-avatar" src="img/robot.svg" alt="Robot" />
+          <span id="robot-dot" class="robot-dot"></span>
+        </div>
+        <div class="robot-title">
+          <h2>Robot de canales</h2>
+          <span id="robot-state" class="robot-pill">Cargando…</span>
+        </div>
+      </div>
+      <div class="robot-stats">
+        <div class="robot-stat">
+          <span>Última sincronización</span>
+          <b id="robot-last">—</b>
+          <small id="robot-last-detail" class="muted"></small>
+        </div>
+        <div class="robot-stat"><span>Canales activos</span><b id="robot-active">—</b></div>
+        <div class="robot-stat"><span>Añadidos (última pasada)</span><b id="robot-added">—</b><small id="robot-repaired" class="muted"></small></div>
+        <div class="robot-stat"><span>Caídos ocultos</span><b id="robot-broken">—</b><small class="muted">se borran a los 7 días</small></div>
+      </div>
+      <div class="robot-actions">
+        <button id="robot-run-btn" class="btn btn-primary">▶ Lanzar el robot ahora</button>
+        <button id="robot-token-btn" class="btn">🔑 Conectar con GitHub</button>
+        <a class="btn btn-ghost" href="https://github.com/lloretmoja-dotcom/Boughazi-SmartTV/actions/workflows/daily_indexer.yml">Ver en GitHub ↗</a>
+      </div>
+      <div id="robot-token-box" class="robot-token-box hidden">
+        <label for="robot-token-input">Clave de GitHub (token) para poder lanzar el robot desde aquí</label>
+        <input id="robot-token-input" type="password" autocomplete="off" spellcheck="false" placeholder="github_pat_…" />
+        <p class="fine-print">Créala en GitHub → Settings → Developer settings → Fine-grained tokens, solo para el repositorio Boughazi-SmartTV y con el permiso "Actions: Read and write". Se guarda solo en este móvil.</p>
+        <button id="robot-token-save" class="btn btn-primary">Guardar</button>
+        <button id="robot-token-forget" class="btn">Olvidar clave</button>
+      </div>
+      <p id="robot-status" class="fine-print"></p>
+    </div>
+
     <div class="methods-box">
       <strong>Formas de subir canales</strong>
       <ul class="fine-print">
