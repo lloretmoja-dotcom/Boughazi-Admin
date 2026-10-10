@@ -373,6 +373,10 @@
       </table>
     </div>
 
+    <label class="check-row import-check-row">
+      <input type="checkbox" id="import-check-signal" checked />
+      Comprobar la señal de cada canal antes de subirlo (los que no emiten no se suben)
+    </label>
     <button id="import-confirm-btn" class="btn btn-primary btn-block hidden">Importar canales</button>
     <p id="import-error" class="fine-print error-text hidden"></p>
   </div>
@@ -383,7 +387,7 @@
   <div class="modal">
     <button class="modal-close" data-close="country-modal" aria-label="Cerrar">✕</button>
     <h3>🌍 Canales por país</h3>
-    <p class="fine-print">Busca un país y tócalo: se descarga su catálogo completo de canales de la lista pública iptv-org y se prepara para subirlo a la app con su país y su bandera. Los que ya tienes no se repiten.</p>
+    <p class="fine-print">Busca un país y tócalo: se juntan sus canales de tres listas públicas de canales en abierto (iptv-org, TDTChannels y Free-TV) y se preparan para subirlos a la app con su país y su bandera. Los que ya tienes (mismo enlace o mismo nombre en ese país) no se repiten, y antes de subir se comprueba que cada canal emite.</p>
     <input id="country-search" type="search" class="search-input" placeholder="🔎 Buscar país…" />
     <p id="country-status" class="fine-print"></p>
     <div id="country-grid" class="country-grid"></div>
