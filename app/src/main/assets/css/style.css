@@ -5,8 +5,8 @@
   --border: #262c3a;
   --text: #eef1f6;
   --muted: #8b93a7;
-  --blue: #2f8fff;
-  --orange: #ff8a2f;
+  --blue: #22b8ff;
+  --orange: #8b5cff;
   --danger: #ff4d5e;
   --radius: 12px;
 }
@@ -340,3 +340,50 @@ input:focus, select:focus { outline: 2px solid var(--blue); }
 .country-btn:disabled { opacity: 0.5; }
 .country-btn .country-flag { font-size: 22px; }
 .country-btn .country-have { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+/* ---- robot de canales ---- */
+.robot-mark { background: transparent; }
+.robot-card {
+  background: radial-gradient(120% 140% at 0% 0%, rgba(34,184,255,.16), transparent 60%),
+              radial-gradient(120% 140% at 100% 100%, rgba(139,92,255,.16), transparent 60%),
+              var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 18px;
+}
+.robot-head { display: flex; align-items: center; gap: 14px; }
+.robot-avatar-wrap { position: relative; width: 64px; height: 64px; flex: none; }
+.robot-avatar { width: 64px; height: 64px; }
+.robot-dot {
+  position: absolute; right: 2px; bottom: 4px; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--muted); border: 2px solid var(--panel);
+}
+.robot-dot.on { background: #35d07f; box-shadow: 0 0 10px #35d07f; animation: robot-pulse 1.4s infinite; }
+.robot-dot.ok { background: #22b8ff; }
+.robot-dot.warn { background: #f5b83d; }
+.robot-dot.err { background: var(--danger); }
+@keyframes robot-pulse { 50% { opacity: .4; } }
+.robot-title h2 { margin: 0 0 4px; font-size: 18px; }
+.robot-pill {
+  display: inline-block; font-size: 13px; padding: 3px 10px; border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--border);
+}
+.robot-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px; margin: 14px 0;
+}
+.robot-stat {
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 2px;
+}
+.robot-stat span { color: var(--muted); font-size: 12px; }
+.robot-stat b { font-size: 20px; }
+.robot-stat small { font-size: 12px; }
+.robot-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.robot-actions a.btn { text-decoration: none; display: inline-flex; align-items: center; }
+.robot-token-box { margin-top: 12px; }
+.group-iso {
+  font-size: 11px; font-weight: 700; letter-spacing: .5px; padding: 1px 6px;
+  border-radius: 6px; border: 1px solid var(--border); color: var(--muted);
+}

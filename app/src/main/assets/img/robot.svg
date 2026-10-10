@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Robot">
+  <defs>
+    <linearGradient id="rh" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3be8ff"/>
+      <stop offset="1" stop-color="#8b5cff"/>
+    </linearGradient>
+  </defs>
+  <line x1="64" y1="14" x2="64" y2="30" stroke="url(#rh)" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="64" cy="11" r="7" fill="#3be8ff"/>
+  <rect x="10" y="56" width="12" height="28" rx="5" fill="url(#rh)"/>
+  <rect x="106" y="56" width="12" height="28" rx="5" fill="url(#rh)"/>
+  <rect x="20" y="30" width="88" height="80" rx="26" fill="url(#rh)"/>
+  <rect x="30" y="44" width="68" height="44" rx="18" fill="#0b1020"/>
+  <circle cx="48" cy="64" r="8" fill="#3be8ff"/>
+  <circle cx="80" cy="64" r="8" fill="#3be8ff"/>
+  <rect x="50" y="78" width="28" height="4" rx="2" fill="#3be8ff" opacity=".7"/>
+</svg>
