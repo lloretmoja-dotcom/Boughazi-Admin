@@ -783,7 +783,7 @@ el("channel-form").addEventListener("submit", async (e) => {
       .update(payload)
       .eq("id", state.editingChannelId));
   } else {
-    ({ error } = await supabaseClient.from("bt_channels").insert(payload));
+    ({ error } = await supabaseClient.from("bt_channels").insert({ ...payload, is_broken: false }));
   }
 
   if (error) {
@@ -1430,6 +1430,9 @@ el("import-confirm-btn").addEventListener("click", async () => {
       category: categoriaFinal,
       logo_url: safeHttpUrl(it.logoUrl) ? it.logoUrl : null,
       stream_url: it.streamUrl,
+      // Se marca "funciona" desde el principio: la app de la tele solo
+      // enseña los canales que no están marcados como caídos.
+      is_broken: false,
     };
   });
 
