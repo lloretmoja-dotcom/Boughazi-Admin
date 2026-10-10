@@ -1221,6 +1221,137 @@ async function loadCountryList() {
   return state.countries;
 }
 
+
+/* ---- Más fuentes de canales en abierto ----
+   Además de iptv-org, se consultan otras dos listas públicas de canales
+   que se emiten gratis y en abierto:
+   - TDTChannels (tdtchannels.com): canales de España y algunos de
+     otros países, mantenida a mano y muy fiable.
+   - Free-TV/IPTV (GitHub): solo canales gratuitos en abierto, ordenados
+     por país.
+   Las dos se descargan una vez y se guardan mientras el panel está
+   abierto; luego, de cada una, se cogen los canales del país elegido. */
+
+const TDTCHANNELS_JSON = "https://www.tdtchannels.com/lists/tv.json";
+const FREE_TV_M3U = "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8";
+
+// Nombres de país que estas listas escriben a su manera.
+const COUNTRY_ALIASES = {
+  uk: "GB", "united kingdom": "GB", england: "GB", usa: "US", "united states": "US",
+  "south korea": "KR", korea: "KR", "north korea": "KP", russia: "RU",
+  "czech republic": "CZ", holland: "NL", netherlands: "NL", "the netherlands": "NL",
+  uae: "AE", "united arab emirates": "AE", "bosnia and herzegovina": "BA",
+  "ivory coast": "CI", "vatican city": "VA", kosovo: "XK", "north macedonia": "MK",
+  macedonia: "MK", "dominican republic": "DO", taiwan: "TW", "hong kong": "HK",
+  palestine: "PS", vietnam: "VN", "viet nam": "VN", iran: "IR", syria: "SY",
+  bolivia: "BO", venezuela: "VE", tanzania: "TZ", moldova: "MD", laos: "LA",
+  "cape verde": "CV", eswatini: "SZ", turkey: "TR", turkiye: "TR",
+};
+
+/* Código del país ("ES") a partir de su nombre en español o en inglés. */
+let countryCodeByNameCache = null;
+function countryCodeFromName(name) {
+  if (!countryCodeByNameCache) {
+    countryCodeByNameCache = new Map();
+    let regionNamesEn = null;
+    try {
+      regionNamesEn = new Intl.DisplayNames(["en"], { type: "region" });
+    } catch (_err) {
+      regionNamesEn = null;
+    }
+    const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for (const a of letters) {
+      for (const b of letters) {
+        const code = a + b;
+        const es = spanishCountryName(code);
+        if (es) countryCodeByNameCache.set(normalizeText(es), code);
+        if (regionNamesEn) {
+          try {
+            const en = regionNamesEn.of(code);
+            if (en && en !== code) countryCodeByNameCache.set(normalizeText(en), code);
+          } catch (_err) {
+            /* código que el móvil no conoce */
+          }
+        }
+      }
+    }
+    for (const c of state.countries || []) {
+      if (c.englishName) countryCodeByNameCache.set(normalizeText(c.englishName), c.code);
+    }
+    for (const [alias, code] of Object.entries(COUNTRY_ALIASES)) countryCodeByNameCache.set(alias, code);
+  }
+  const key = normalizeText(name).replace(/^(the)\s+/, "");
+  return countryCodeByNameCache.get(key) || null;
+}
+
+/* TDTChannels: { countries: [ { name, ambits: [ { name, channels: [
+   { name, logo, options: [ { format, url } ] } ] } ] } ] }.
+   Se lee con cuidado por si cambian algún campo: si no se entiende,
+   esa fuente se salta y se sigue con las demás. */
+function tdtChannelsToItems(data, code) {
+  const items = [];
+  const countries = data && Array.isArray(data.countries) ? data.countries : [];
+  for (const country of countries) {
+    if (countryCodeFromName(country && country.name) !== code) continue;
+    for (const ambit of Array.isArray(country.ambits) ? country.ambits : []) {
+      for (const ch of Array.isArray(ambit && ambit.channels) ? ambit.channels : []) {
+        const options = Array.isArray(ch && ch.options) ? ch.options : [];
+        // Se prefiere el enlace .m3u8 (el que la tele sabe reproducir).
+        const option =
+          options.find((o) => o && /m3u8/i.test(String(o.format || "")) && safeHttpUrl(o.url)) ||
+          options.find((o) => o && /\.m3u8(\?|$)/i.test(String(o.url || "")) && safeHttpUrl(o.url));
+        if (!option) continue;
+        items.push({
+          name: String(ch.name || "").trim() || `Canal ${items.length + 1}`,
+          category: String((ambit && ambit.name) || ""),
+          logoUrl: String(ch.logo || ""),
+          streamUrl: String(option.url).trim(),
+        });
+      }
+    }
+  }
+  return items;
+}
+
+/* Free-TV: una sola lista M3U con todos los países; el país va en
+   group-title. */
+function freeTvToItems(text, code) {
+  return parseChannelList(text).filter((it) => countryCodeFromName(it.category) === code);
+}
+
+const sourceCache = new Map();
+async function cachedDownload(url) {
+  if (!sourceCache.has(url)) {
+    const p = downloadListText(url);
+    sourceCache.set(url, p);
+    p.catch(() => sourceCache.delete(url)); // si falla, se reintenta la próxima vez
+  }
+  return sourceCache.get(url);
+}
+
+/* Descarga el país de todas las fuentes a la vez. Si una falla, no
+   pasa nada: se usan las otras y se dice cuál no se pudo leer. */
+async function downloadCountryFromAllSources(country) {
+  const sources = [
+    { name: "iptv-org", get: async () => parseChannelList(await downloadListText(iptvOrgCountryList(country.code))) },
+    { name: "TDTChannels", get: async () => tdtChannelsToItems(JSON.parse(await cachedDownload(TDTCHANNELS_JSON)), country.code) },
+    { name: "Free-TV", get: async () => freeTvToItems(await cachedDownload(FREE_TV_M3U), country.code) },
+  ];
+  const results = await Promise.allSettled(sources.map((src) => src.get()));
+  const items = [];
+  const counts = [];
+  const failed = [];
+  results.forEach((r, i) => {
+    if (r.status === "fulfilled") {
+      items.push(...r.value);
+      if (r.value.length) counts.push(`${r.value.length} de ${sources[i].name}`);
+    } else {
+      failed.push(sources[i].name);
+    }
+  });
+  return { items, summary: counts.join(", ") || "sin canales", failed };
+}
+
 function renderCountryGrid() {
   const needle = normalizeText(el("country-search").value);
   const haveByCountry = new Map();
@@ -1271,17 +1402,12 @@ el("country-grid").addEventListener("click", async (e) => {
   const buttons = el("country-grid").querySelectorAll("button");
   buttons.forEach((b) => (b.disabled = true));
   el("country-status").textContent = `Descargando los canales de ${country.flag} ${country.name}…`;
-  let items;
-  try {
-    items = parseChannelList(await downloadListText(iptvOrgCountryList(country.code)));
-  } catch (err) {
-    el("country-status").textContent = `No se pudieron descargar los canales de ${country.name}: ${err.message}`;
-    buttons.forEach((b) => (b.disabled = false));
-    return;
-  }
+  const { items, summary, failed } = await downloadCountryFromAllSources(country);
   buttons.forEach((b) => (b.disabled = false));
   if (!items.length) {
-    el("country-status").textContent = `La lista no tiene canales de ${country.flag} ${country.name} ahora mismo.`;
+    el("country-status").textContent =
+      `Ninguna fuente tiene canales de ${country.flag} ${country.name} ahora mismo.` +
+      (failed.length ? ` (No se pudo leer: ${failed.join(", ")}.)` : "");
     return;
   }
 
@@ -1298,7 +1424,10 @@ el("country-grid").addEventListener("click", async (e) => {
   el("import-modal").classList.remove("hidden");
   showImportItems(items);
   if (state.importItems.length) {
-    el("import-status").textContent = `${country.flag} ${country.name}: ` + el("import-status").textContent;
+    el("import-status").textContent =
+      `${country.flag} ${country.name} (${summary}): ` +
+      el("import-status").textContent +
+      (failed.length ? ` No se pudo leer: ${failed.join(", ")}.` : "");
   }
 });
 
@@ -1312,6 +1441,20 @@ function showImportPreview(text) {
   showImportItems(parseChannelList(text));
 }
 
+/* Clave para reconocer el mismo canal aunque venga escrito un poco
+   distinto: sin tildes, sin mayúsculas, sin "(1080p)", "[Geo-blocked]"
+   ni "HD" al final. Los nombres genéricos ("Canal 12") no cuentan. */
+function channelNameKey(name, category) {
+  const clean = normalizeText(name)
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, " ")
+    .replace(/\b(uhd|fhd|hd|sd|4k|tv hd)\b\s*$/g, " ")
+    .replace(/[^a-z0-9\u0600-\u06ff]+/g, " ")
+    .trim();
+  if (!clean || /^canal \d+$/.test(clean)) return null;
+  const cat = normalizeText(category && String(category).trim() ? category : "Sin categoría");
+  return `${cat}|${clean}`;
+}
+
 /* Muestra la vista previa a partir de canales ya leídos, vengan de un M3U
    o de un servidor Xtream: { name, category, logoUrl, streamUrl }. */
 function showImportItems(parsedItems) {
@@ -1321,11 +1464,20 @@ function showImportItems(parsedItems) {
   const skipped = parsed.length - valid.length;
   // Y los que ya están en el panel o se repiten dentro de la misma lista,
   // para no llenar la lista de canales duplicados.
+  // Se compara por enlace y también por nombre dentro del mismo país:
+  // el mismo canal suele venir en varias fuentes con enlaces distintos
+  // ("La 1", "La 1 HD", "La 1 (1080p)").
+  const override = el("import-category-override").value.trim();
   const seen = new Set(state.channels.map((c) => String(c.stream_url || "").trim()));
+  const seenNames = new Set(
+    state.channels.map((c) => channelNameKey(c.name, c.category)).filter(Boolean)
+  );
   const items = valid.filter((it) => {
     const key = it.streamUrl.trim();
-    if (seen.has(key)) return false;
+    const nameKey = channelNameKey(it.name, override || it.category);
+    if (seen.has(key) || (nameKey && seenNames.has(nameKey))) return false;
     seen.add(key);
+    if (nameKey) seenNames.add(nameKey);
     return true;
   });
   const duplicates = valid.length - items.length;
@@ -1404,9 +1556,86 @@ el("import-category-override").addEventListener("input", () => {
   if (state.importItems.length) renderImportPreview();
 });
 
+/* ---- Comprobar la señal antes de subir ----
+   Dentro de la app del panel lo hace Android (window.BoughaziNative),
+   que puede abrir cualquier enlace. En un navegador normal se intenta
+   con fetch, pero muchas webs no lo permiten (CORS): esos canales
+   quedan "sin comprobar" y se suben igualmente, porque no se sabe si
+   funcionan o no. */
+let nativeStreamSeq = 0;
+const nativeStreamChecks = new Map();
+window.onNativeStreamCheck = (id, ok, reason) => {
+  const done = nativeStreamChecks.get(id);
+  if (!done) return;
+  nativeStreamChecks.delete(id);
+  done({ status: ok ? "ok" : "dead", reason });
+};
+
+async function checkStreamSignal(url) {
+  if (window.BoughaziNative && window.BoughaziNative.checkStream) {
+    const id = ++nativeStreamSeq;
+    return new Promise((resolve) => {
+      nativeStreamChecks.set(id, resolve);
+      // Por si Android no contestara nunca.
+      setTimeout(() => {
+        if (nativeStreamChecks.delete(id)) resolve({ status: "unknown", reason: "sin respuesta" });
+      }, 30000);
+      window.BoughaziNative.checkStream(id, url);
+    });
+  }
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, { method: "GET", mode: "cors", signal: controller.signal });
+    return res.ok ? { status: "ok" } : { status: "dead", reason: `error ${res.status}` };
+  } catch (_err) {
+    return { status: "unknown", reason: "el navegador no deja comprobarlo" };
+  } finally {
+    clearTimeout(timeoutId);
+    controller.abort(); // un directo no termina nunca: se corta aquí
+  }
+}
+
+async function checkSignals(items, onProgress) {
+  const results = new Array(items.length);
+  let next = 0;
+  let done = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await checkStreamSignal(items[i].streamUrl);
+      done += 1;
+      onProgress(done, items.length);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(12, items.length) }, worker));
+  return results;
+}
+
 el("import-confirm-btn").addEventListener("click", async () => {
-  const chosen = state.importItems.filter((it) => it.selected);
+  let chosen = state.importItems.filter((it) => it.selected);
   if (!chosen.length) return;
+
+  let signalNote = "";
+  if (el("import-check-signal").checked) {
+    el("import-confirm-btn").disabled = true;
+    el("import-error").classList.add("hidden");
+    const results = await checkSignals(chosen, (done, total) => {
+      el("import-confirm-btn").textContent = `Comprobando señal… ${done}/${total}`;
+    });
+    const dead = chosen.filter((_it, i) => results[i].status === "dead").length;
+    const unknown = chosen.filter((_it, i) => results[i].status === "unknown").length;
+    chosen = chosen.filter((_it, i) => results[i].status !== "dead");
+    signalNote =
+      `${dead} sin señal no se han subido.` +
+      (unknown ? ` ${unknown} no se pudieron comprobar y se han subido igualmente.` : "");
+    el("import-confirm-btn").disabled = false;
+    if (!chosen.length) {
+      el("import-status").textContent = `Ninguno de los canales elegidos tiene señal ahora mismo. ${signalNote}`;
+      updateImportConfirmLabel();
+      return;
+    }
+  }
 
   const override = el("import-category-override").value.trim();
 
@@ -1462,6 +1691,8 @@ el("import-confirm-btn").addEventListener("click", async () => {
   el("import-modal").classList.add("hidden");
   await loadChannels();
   await refreshStats();
+  el("channels-status").textContent =
+    `Subidos ${rows.length} canal${rows.length === 1 ? "" : "es"}.` + (signalNote ? ` ${signalNote}` : "");
 });
 
 /* ------------------------------------------------------------ */

@@ -15,6 +15,7 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.Executors
 
 /**
  * El panel de administración de Boughazi es una página web (HTML/CSS/JS)
@@ -132,6 +133,79 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { webView.evaluateJavascript(js, null) }
             }.start()
         }
+
+        // "Comprobar señal": mira si el enlace de un canal responde de
+        // verdad (sin CORS, que en el WebView bloquea casi todos). Se
+        // contesta con window.onNativeStreamCheck(id, ok, motivo).
+        @JavascriptInterface
+        fun checkStream(id: Int, url: String) {
+            streamCheckPool.execute {
+                val reason = try {
+                    probeStream(url)
+                } catch (e: Exception) {
+                    e.message ?: e.javaClass.simpleName
+                }
+                val ok = reason == null
+                val js = "window.onNativeStreamCheck($id, $ok, ${JSONObject.quote(reason ?: "")})"
+                runOnUiThread { webView.evaluateJavascript(js, null) }
+            }
+        }
+    }
+
+    // Varias comprobaciones a la vez, pero no cientos: así no se satura
+    // la conexión del móvil.
+    private val streamCheckPool = Executors.newFixedThreadPool(12)
+
+    /**
+     * Devuelve null si el canal emite, o el motivo si no. Solo se leen
+     * los primeros 64 KB: un canal en directo no termina nunca.
+     * Una lista HLS (.m3u8) tiene que empezar por #EXTM3U y traer al
+     * menos una línea que no sea un comentario (un trozo de vídeo o
+     * una calidad); si llega vacía, el canal no está emitiendo.
+     */
+    private fun probeStream(start: String): String? {
+        var current = start
+        repeat(5) {
+            val url = URL(current)
+            if (url.protocol != "http" && url.protocol != "https") return "enlace no válido"
+            val conn = url.openConnection() as HttpURLConnection
+            conn.instanceFollowRedirects = false
+            conn.connectTimeout = 8_000
+            conn.readTimeout = 8_000
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) BoughaziAdmin")
+            try {
+                val code = conn.responseCode
+                if (code in 300..399) {
+                    val location = conn.getHeaderField("Location") ?: return "redirección sin destino"
+                    current = URL(url, location).toString()
+                    return@repeat
+                }
+                if (code !in 200..299) return "error $code"
+                val out = ByteArrayOutputStream()
+                conn.inputStream.use { input ->
+                    val buf = ByteArray(8 * 1024)
+                    while (out.size() < 64 * 1024) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                    }
+                }
+                if (out.size() == 0) return "no envía nada"
+                val head = out.toString("UTF-8").trimStart('\uFEFF', ' ', '\r', '\n')
+                if (head.startsWith("#EXTM3U")) {
+                    val hasContent = head.lineSequence().any { line ->
+                        val t = line.trim()
+                        t.isNotEmpty() && !t.startsWith("#")
+                    }
+                    return if (hasContent) null else "lista vacía"
+                }
+                if (head.startsWith("<")) return "contesta una página web, no vídeo"
+                return null
+            } finally {
+                conn.disconnect()
+            }
+        }
+        return "demasiadas redirecciones"
     }
 
     private fun downloadList(start: String): String {
